@@ -1,0 +1,1 @@
+[2025-04-06 02:23:00] Email: unknown, Status: Failed, IP: ::1, Message: Missing email or token parameters
