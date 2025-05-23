@@ -1,0 +1,4 @@
+2025-05-23 14:23:47 - Email sending failed: SMTP Error: Could not connect to SMTP host. Failed to connect to server
+2025-05-23 14:40:38 - Email sending failed: SMTP Error: Could not connect to SMTP host. Failed to connect to server
+2025-05-23 14:42:37 - Email sending failed: SMTP Error: Could not connect to SMTP host. Failed to connect to server
+2025-05-23 14:47:19 - Email sending failed: SMTP Error: Could not connect to SMTP host. Failed to connect to server

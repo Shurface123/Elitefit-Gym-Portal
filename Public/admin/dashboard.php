@@ -12,8 +12,14 @@ $userName = $_SESSION['name'];
 // Include dashboard data provider
 require_once __DIR__ . '/dashboard-data.php';
 
+// Include archived users data provider
+require_once __DIR__ . '/archived-users-data.php';
+
 // Get all dashboard data
 $dashboardData = getDashboardData();
+
+// Get archived users data
+$archivedData = getArchivedUsersData();
 
 // Extract data
 $userStats = $dashboardData['userStats'];
@@ -25,10 +31,21 @@ $todaysSessions = $dashboardData['todaysSessions'];
 $monthlyRevenue = $dashboardData['monthlyRevenue'];
 $unreadNotifications = $dashboardData['unreadNotifications'];
 
+// Extract archived data
+$totalArchived = $archivedData['total_archived'];
+$archivedByRole = $archivedData['archived_by_role'];
+$recentArchived = $archivedData['recent_archived'];
+$monthlyArchived = $archivedData['monthly_archived'];
+
 // Format chart data
 $chartData = formatChartData($monthlyRegistrations);
 $chartLabels = $chartData['labels'];
 $chartData = $chartData['data'];
+
+// Format archived chart data
+$archivedChartData = formatArchivedChartData($monthlyArchived);
+$archivedChartLabels = $archivedChartData['labels'];
+$archivedChartData = $archivedChartData['data'];
 
 // Calculate equipment operational percentage
 $equipmentPercentage = isset($equipmentStatus['operational_percentage']) ? 
@@ -446,6 +463,10 @@ $theme = isset($_COOKIE['admin_theme']) ? $_COOKIE['admin_theme'] : 'dark';
             background: linear-gradient(135deg, var(--info), var(--info-light));
         }
 
+        .card-icon.archived {
+            background: linear-gradient(135deg, var(--danger), var(--danger-light));
+        }
+
         .chart-container {
             background-color: var(--card-bg);
             border-radius: var(--border-radius);
@@ -502,6 +523,10 @@ $theme = isset($_COOKIE['admin_theme']) ? $_COOKIE['admin_theme'] : 'dark';
             display: flex;
             justify-content: space-between;
             align-items: center;
+        }
+
+        .archived-list-header {
+            background: linear-gradient(135deg, var(--danger), var(--danger-light));
         }
 
         .user-list-header h3,
@@ -794,6 +819,10 @@ $theme = isset($_COOKIE['admin_theme']) ? $_COOKIE['admin_theme'] : 'dark';
             background: linear-gradient(135deg, #d97706, #f59e0b);
         }
 
+        .stat-icon.red {
+            background: linear-gradient(135deg, #dc2626, #ef4444);
+        }
+
         .stat-info h4 {
             font-size: 0.9rem;
             color: var(--text-muted);
@@ -894,6 +923,58 @@ $theme = isset($_COOKIE['admin_theme']) ? $_COOKIE['admin_theme'] : 'dark';
             align-items: center;
             justify-content: center;
             font-weight: bold;
+        }
+
+        /* Tab Navigation */
+        .tab-navigation {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            overflow-x: auto;
+            scrollbar-width: none;
+        }
+
+        .tab-navigation::-webkit-scrollbar {
+            display: none;
+        }
+
+        .tab-button {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-weight: 500;
+            position: relative;
+            white-space: nowrap;
+        }
+
+        .tab-button::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background-color: var(--primary);
+            transform: scaleX(0);
+            transition: transform 0.3s ease;
+        }
+
+        .tab-button.active {
+            color: var(--primary);
+        }
+
+        .tab-button.active::after {
+            transform: scaleX(1);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
         }
 
         /* Responsive Styles */
@@ -1036,6 +1117,7 @@ $theme = isset($_COOKIE['admin_theme']) ? $_COOKIE['admin_theme'] : 'dark';
                 <li><a href="users.php"><i class="fas fa-users"></i> <span>Users</span></a></li>
                 <li><a href="trainers.php"><i class="fas fa-user-tie"></i> <span>Trainers</span></a></li>
                 <li><a href="equipment-managers.php"><i class="fas fa-dumbbell"></i> <span>Equipment</span></a></li>
+                <li><a href="archived-users.php"><i class="fas fa-archive"></i> <span>Archived Users</span></a></li>
                 <li><a href="reports.php"><i class="fas fa-chart-line"></i> <span>Reports</span></a></li>
                 <li><a href="admin_settings.php"><i class="fas fa-cog"></i> <span>Settings</span></a></li>
                 <li><a href="../logout.php"><i class="fas fa-sign-out-alt"></i> <span>Logout</span></a></li>
@@ -1078,140 +1160,171 @@ $theme = isset($_COOKIE['admin_theme']) ? $_COOKIE['admin_theme'] : 'dark';
                 </div>
             </div>
 
-            <!-- Quick Stats -->
-            <div class="quick-stats">
-                <div class="stat-card">
-                    <div class="stat-icon purple">
-                        <i class="fas fa-users"></i>
-                    </div>
-                    <div class="stat-info">
-                        <h4>Active Members</h4>
-                        <p><?php echo $userStats['member_count']; ?></p>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon blue">
-                        <i class="fas fa-calendar-check"></i>
-                    </div>
-                    <div class="stat-info">
-                        <h4>Today's Sessions</h4>
-                        <p><?php echo isset($todaysSessions['total_sessions']) ? $todaysSessions['total_sessions'] : 0; ?></p>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon green">
-                        <i class="fas fa-dollar-sign"></i>
-                    </div>
-                    <div class="stat-info">
-                        <h4>Revenue (Month)</h4>
-                        <p>$<?php echo isset($monthlyRevenue['monthly_revenue']) ? number_format($monthlyRevenue['monthly_revenue'], 2) : '0.00'; ?></p>
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon orange">
-                        <i class="fas fa-dumbbell"></i>
-                    </div>
-                    <div class="stat-info">
-                        <h4>Equipment Status</h4>
-                        <p><?php echo $equipmentPercentage; ?>% Operational</p>
-                    </div>
-                </div>
+            <!-- Tab Navigation -->
+            <div class="tab-navigation">
+                <button class="tab-button active" data-tab="overview">Overview</button>
+                <button class="tab-button" data-tab="archived-users">Archived Users</button>
             </div>
 
-            <!-- Dashboard Cards -->
-            <div class="dashboard-cards">
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Members</h3>
-                        <div class="card-icon members">
+            <!-- Overview Tab Content -->
+            <div id="overview" class="tab-content active">
+                <!-- Quick Stats -->
+                <div class="quick-stats">
+                    <div class="stat-card">
+                        <div class="stat-icon purple">
                             <i class="fas fa-users"></i>
                         </div>
-                    </div>
-                    <div class="card-body">
-                        <h2><?php echo $userStats['member_count']; ?></h2>
-                        <p>Total Members</p>
-                        <a href="users.php?role=Member" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Trainers</h3>
-                        <div class="card-icon trainers">
-                            <i class="fas fa-user-tie"></i>
+                        <div class="stat-info">
+                            <h4>Active Members</h4>
+                            <p><?php echo $userStats['member_count']; ?></p>
                         </div>
                     </div>
-                    <div class="card-body">
-                        <h2><?php echo $userStats['trainer_count']; ?></h2>
-                        <p>Total Trainers</p>
-                        <a href="trainers.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Equipment Managers</h3>
-                        <div class="card-icon equipment">
-                            <i class="fas fa-tools"></i>
+                    <div class="stat-card">
+                        <div class="stat-icon blue">
+                            <i class="fas fa-calendar-check"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h4>Today's Sessions</h4>
+                            <p><?php echo isset($todaysSessions['total_sessions']) ? $todaysSessions['total_sessions'] : 0; ?></p>
                         </div>
                     </div>
-                    <div class="card-body">
-                        <h2><?php echo $userStats['equipment_manager_count']; ?></h2>
-                        <p>Total Equipment Managers</p>
-                        <a href="equipment-managers.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Total Users</h3>
-                        <div class="card-icon total">
-                            <i class="fas fa-user-friends"></i>
+                    <div class="stat-card">
+                        <div class="stat-icon green">
+                            <i class="fas fa-dollar-sign"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h4>Revenue (Month)</h4>
+                            <p>$<?php echo isset($monthlyRevenue['monthly_revenue']) ? number_format($monthlyRevenue['monthly_revenue'], 2) : '0.00'; ?></p>
                         </div>
                     </div>
-                    <div class="card-body">
-                        <h2><?php echo $userStats['total_users']; ?></h2>
-                        <p>All Users</p>
-                        <a href="users.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                    <div class="stat-card">
+                        <div class="stat-icon orange">
+                            <i class="fas fa-dumbbell"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h4>Equipment Status</h4>
+                            <p><?php echo $equipmentPercentage; ?>% Operational</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon red">
+                            <i class="fas fa-archive"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h4>Archived Users</h4>
+                            <p><?php echo $totalArchived; ?></p>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- User Registration Chart -->
-            <div class="chart-container">
-                <div class="chart-header">
-                    <h3>User Registrations (Last 6 Months)</h3>
-                    <div>
-                        <button class="btn btn-sm" id="refreshChartBtn">
-                            <i class="fas fa-sync-alt"></i> Refresh
-                        </button>
+                <!-- Dashboard Cards -->
+                <div class="dashboard-cards">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Members</h3>
+                            <div class="card-icon members">
+                                <i class="fas fa-users"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $userStats['member_count']; ?></h2>
+                            <p>Total Members</p>
+                            <a href="users.php?role=Member" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Trainers</h3>
+                            <div class="card-icon trainers">
+                                <i class="fas fa-user-tie"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $userStats['trainer_count']; ?></h2>
+                            <p>Total Trainers</p>
+                            <a href="trainers.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Equipment Managers</h3>
+                            <div class="card-icon equipment">
+                                <i class="fas fa-tools"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $userStats['equipment_manager_count']; ?></h2>
+                            <p>Total Equipment Managers</p>
+                            <a href="equipment-managers.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Total Users</h3>
+                            <div class="card-icon total">
+                                <i class="fas fa-user-friends"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $userStats['total_users']; ?></h2>
+                            <p>All Users</p>
+                            <a href="users.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Archived Users</h3>
+                            <div class="card-icon archived">
+                                <i class="fas fa-archive"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $totalArchived; ?></h2>
+                            <p>Total Archived</p>
+                            <a href="archived-users.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                        </div>
                     </div>
                 </div>
-                <div class="chart-body">
-                    <canvas id="registrationChart"></canvas>
-                </div>
-            </div>
 
-            <!-- Recent Users -->
-            <div class="user-list">
-                <div class="user-list-header">
-                    <h3>Recent Users</h3>
-                    <a href="users.php" class="btn btn-sm"><i class="fas fa-users"></i> View All Users</a>
+                <!-- User Registration Chart -->
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3>User Registrations (Last 6 Months)</h3>
+                        <div>
+                            <button class="btn btn-sm" id="refreshChartBtn">
+                                <i class="fas fa-sync-alt"></i> Refresh
+                            </button>
+                        </div>
+                    </div>
+                    <div class="chart-body">
+                        <canvas id="registrationChart"></canvas>
+                    </div>
                 </div>
-                <div class="user-list-body">
-                    <div class="table-container">
-                        <table class="table">
-                            <thead>
-                                <tr>
-                                    <th>Name</th>
-                                    <th>Email</th>
-                                    <th>Role</th>
-                                    <th>Joined</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                            <?php 
+
+                <!-- Recent Users -->
+                <div class="user-list">
+                    <div class="user-list-header">
+                        <h3>Recent Users</h3>
+                        <a href="users.php" class="btn btn-sm"><i class="fas fa-users"></i> View All Users</a>
+                    </div>
+                    <div class="user-list-body">
+                        <div class="table-container">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Email</th>
+                                        <th>Role</th>
+                                        <th>Joined</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                <?php 
 $hasRecentUsers = false;
 if (isset($recentUsers) && is_array($recentUsers)) {
     foreach ($recentUsers as $user) {
@@ -1252,7 +1365,7 @@ if (isset($recentUsers) && is_array($recentUsers)) {
                 <a href="view-user.php?id=<?php echo $user['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
                 <a href="edit-user.php?id=<?php echo $user['id']; ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fas fa-edit"></i></a>
                 <?php if ($user['role'] !== 'Admin'): ?>
-                    <a href="javascript:void(0);" onclick="confirmDelete(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['name']); ?>')" class="btn btn-sm btn-danger" title="Delete"><i class="fas fa-trash"></i></a>
+                    <a href="javascript:void(0);" onclick="confirmArchive(<?php echo $user['id']; ?>, '<?php echo htmlspecialchars($user['name']); ?>')" class="btn btn-sm btn-danger" title="Archive"><i class="fas fa-archive"></i></a>
                 <?php endif; ?>
             </td>
         </tr>
@@ -1262,31 +1375,31 @@ if (isset($recentUsers) && is_array($recentUsers)) {
         <td colspan="5">No users found.</td>
     </tr>
 <?php endif; ?>
-                            </tbody>
-                        </table>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- Login Logs -->
-            <div class="log-list">
-                <div class="log-list-header">
-                    <h3>Recent Login Activity</h3>
-                    <a href="login-logs.php" class="btn btn-sm"><i class="fas fa-history"></i> View All Logs</a>
-                </div>
-                <div class="log-list-body">
-                    <div class="table-container">
-                        <table class="table">
-                            <thead>
-                                <tr>
-                                    <th>Email</th>
-                                    <th>Status</th>
-                                    <th>IP Address</th>
-                                    <th>Time</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                            <?php 
+                <!-- Login Logs -->
+                <div class="log-list">
+                    <div class="log-list-header">
+                        <h3>Recent Login Activity</h3>
+                        <a href="login-logs.php" class="btn btn-sm"><i class="fas fa-history"></i> View All Logs</a>
+                    </div>
+                    <div class="log-list-body">
+                        <div class="table-container">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Email</th>
+                                        <th>Status</th>
+                                        <th>IP Address</th>
+                                        <th>Time</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                <?php 
 $hasLoginLogs = false;
 if (isset($loginLogs) && is_array($loginLogs)) {
     foreach ($loginLogs as $log) {
@@ -1314,28 +1427,173 @@ if (isset($loginLogs) && is_array($loginLogs)) {
         <td colspan="4">No login logs found.</td>
     </tr>
 <?php endif; ?>
-                            </tbody>
-                        </table>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Archived Users Tab Content -->
+            <div id="archived-users" class="tab-content">
+                <!-- Archived Users Chart -->
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3>Archived Users (Last 6 Months)</h3>
+                        <div>
+                            <button class="btn btn-sm" id="refreshArchivedChartBtn">
+                                <i class="fas fa-sync-alt"></i> Refresh
+                            </button>
+                        </div>
+                    </div>
+                    <div class="chart-body">
+                        <canvas id="archivedChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Archived Users Statistics -->
+                <div class="dashboard-cards">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Archived Members</h3>
+                            <div class="card-icon archived">
+                                <i class="fas fa-users"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $archivedByRole['Member']; ?></h2>
+                            <p>Total Archived Members</p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Archived Trainers</h3>
+                            <div class="card-icon archived">
+                                <i class="fas fa-user-tie"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $archivedByRole['Trainer']; ?></h2>
+                            <p>Total Archived Trainers</p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Archived Equipment Managers</h3>
+                            <div class="card-icon archived">
+                                <i class="fas fa-tools"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $archivedByRole['EquipmentManager']; ?></h2>
+                            <p>Total Archived Managers</p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Total Archived</h3>
+                            <div class="card-icon archived">
+                                <i class="fas fa-archive"></i>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <h2><?php echo $totalArchived; ?></h2>
+                            <p>All Archived Users</p>
+                            <a href="archived-users.php" class="btn btn-sm"><i class="fas fa-eye"></i> View All</a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recent Archived Users -->
+                <div class="user-list">
+                    <div class="user-list-header archived-list-header">
+                        <h3>Recently Archived Users</h3>
+                        <a href="archived-users.php" class="btn btn-sm"><i class="fas fa-archive"></i> View All Archived</a>
+                    </div>
+                    <div class="user-list-body">
+                        <div class="table-container">
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Email</th>
+                                        <th>Role</th>
+                                        <th>Archived Date</th>
+                                        <th>Reason</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                <?php if (!empty($recentArchived)): ?>
+                                    <?php foreach ($recentArchived as $user): ?>
+                                        <tr>
+                                            <td><?php echo htmlspecialchars($user['name']); ?></td>
+                                            <td><?php echo htmlspecialchars($user['email']); ?></td>
+                                            <td>
+                                                <?php 
+                                                    $badgeClass = '';
+                                                    switch ($user['role']) {
+                                                        case 'Admin':
+                                                            $badgeClass = 'badge-danger';
+                                                            break;
+                                                        case 'Trainer':
+                                                            $badgeClass = 'badge-success';
+                                                            break;
+                                                        case 'EquipmentManager':
+                                                            $badgeClass = 'badge-warning';
+                                                            break;
+                                                        default:
+                                                            $badgeClass = 'badge-info';
+                                                    }
+                                                ?>
+                                                <span class="badge <?php echo $badgeClass; ?>">
+                                                    <?php echo htmlspecialchars($user['role']); ?>
+                                                </span>
+                                            </td>
+                                            <td><?php echo date('M d, Y', strtotime($user['archived_at'])); ?></td>
+                                            <td><?php echo htmlspecialchars(substr($user['archive_reason'], 0, 30)) . (strlen($user['archive_reason']) > 30 ? '...' : ''); ?></td>
+                                            <td class="action-buttons">
+                                                <a href="view-archived-user.php?id=<?php echo $user['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
+                                                <a href="restore-user.php?id=<?php echo $user['id']; ?>" class="btn btn-sm btn-warning" title="Restore"><i class="fas fa-undo"></i></a>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <tr>
+                                        <td colspan="6">No archived users found.</td>
+                                    </tr>
+                                <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Delete Confirmation Modal -->
-    <div id="deleteModal" class="modal">
+    <!-- Archive Confirmation Modal -->
+    <div id="archiveModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Confirm Deletion</h3>
+                <h3>Archive User</h3>
             </div>
             <div class="modal-body">
-                <p>Are you sure you want to delete <span id="deleteUserName"></span>? This action cannot be undone.</p>
+                <p>Are you sure you want to archive <span id="archiveUserName"></span>?</p>
+                <div class="form-group" style="margin-top: 15px;">
+                    <label for="archiveReason" style="display: block; margin-bottom: 5px; color: var(--text-color);">Reason for archiving:</label>
+                    <textarea id="archiveReason" name="archive_reason" rows="3" style="width: 100%; padding: 8px; border-radius: var(--border-radius); border: 1px solid var(--border-color); background-color: var(--bg-color); color: var(--text-color);"></textarea>
+                </div>
             </div>
             <div class="modal-footer">
-                <button onclick="closeDeleteModal()" class="btn" style="background-color: var(--secondary);">Cancel</button>
-                <form id="deleteForm" action="delete-user.php" method="post">
-                    <input type="hidden" id="deleteUserId" name="user_id">
-                    <button type="submit" class="btn btn-danger">Delete</button>
+                <button onclick="closeArchiveModal()" class="btn" style="background-color: var(--secondary);">Cancel</button>
+                <form id="archiveForm" action="archive-user.php" method="post">
+                    <input type="hidden" id="archiveUserId" name="user_id">
+                    <input type="hidden" id="archiveReasonInput" name="archive_reason">
+                    <button type="submit" class="btn btn-danger">Archive</button>
                 </form>
             </div>
         </div>
@@ -1377,30 +1635,54 @@ if (isset($loginLogs) && is_array($loginLogs)) {
             var expires = "";
             if (days) {
                 var date = new Date();
-                date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+                date.setTime(date.setTime() + (days * 24 * 60 * 60 * 1000));
                 expires = "; expires=" + date.toUTCString();
             }
             document.cookie = name + "=" + (value || "") + expires + "; path=/";
         }
 
-        // Delete user confirmation
-        function confirmDelete(userId, userName) {
-            document.getElementById('deleteUserId').value = userId;
-            document.getElementById('deleteUserName').textContent = userName;
-            document.getElementById('deleteModal').style.display = 'block';
-            document.getElementById('deleteModal').classList.add('show');
+        // Archive user confirmation
+        function confirmArchive(userId, userName) {
+            document.getElementById('archiveUserId').value = userId;
+            document.getElementById('archiveUserName').textContent = userName;
+            document.getElementById('archiveModal').style.display = 'block';
+            document.getElementById('archiveModal').classList.add('show');
         }
 
-        function closeDeleteModal() {
-            document.getElementById('deleteModal').classList.remove('show');
+        function closeArchiveModal() {
+            document.getElementById('archiveModal').classList.remove('show');
             setTimeout(() => {
-                document.getElementById('deleteModal').style.display = 'none';
+                document.getElementById('archiveModal').style.display = 'none';
             }, 300);
         }
+
+        // Submit archive form with reason
+        document.getElementById('archiveForm').addEventListener('submit', function() {
+            const reason = document.getElementById('archiveReason').value;
+            document.getElementById('archiveReasonInput').value = reason;
+        });
 
         // Mobile menu toggle
         document.getElementById('mobileMenuToggle').addEventListener('click', function() {
             document.getElementById('sidebar').classList.toggle('show');
+        });
+
+        // Tab navigation
+        const tabButtons = document.querySelectorAll('.tab-button');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const tabId = button.getAttribute('data-tab');
+                
+                // Remove active class from all buttons and contents
+                tabButtons.forEach(btn => btn.classList.remove('active'));
+                tabContents.forEach(content => content.classList.remove('active'));
+                
+                // Add active class to clicked button and corresponding content
+                button.classList.add('active');
+                document.getElementById(tabId).classList.add('active');
+            });
         });
 
         // Registration Chart
@@ -1482,7 +1764,82 @@ if (isset($loginLogs) && is_array($loginLogs)) {
             }
         });
 
-        // Refresh chart button
+        // Archived Users Chart
+        const archivedCtx = document.getElementById('archivedChart').getContext('2d');
+        const archivedChart = new Chart(archivedCtx, {
+            type: 'bar',
+            data: {
+                labels: <?php echo json_encode($archivedChartLabels); ?>,
+                datasets: [{
+                    label: 'Archived Users',
+                    data: <?php echo json_encode($archivedChartData); ?>,
+                    backgroundColor: '#ef4444',
+                    borderColor: '#dc2626',
+                    borderWidth: 1,
+                    borderRadius: 5,
+                    barThickness: 20,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top',
+                        labels: {
+                            color: getComputedStyle(document.documentElement).getPropertyValue('--text-color')
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--card-bg'),
+                        titleColor: getComputedStyle(document.documentElement).getPropertyValue('--text-color'),
+                        bodyColor: getComputedStyle(document.documentElement).getPropertyValue('--text-color'),
+                        borderColor: getComputedStyle(document.documentElement).getPropertyValue('--border-color'),
+                        borderWidth: 1,
+                        padding: 10,
+                        displayColors: false,
+                        callbacks: {
+                            label: function(context) {
+                                return `Archived Users: ${context.raw}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: {
+                            color: getComputedStyle(document.documentElement).getPropertyValue('--border-color')
+                        },
+                        ticks: {
+                            color: getComputedStyle(document.documentElement).getPropertyValue('--text-color'),
+                            stepSize: 1
+                        }
+                    },
+                    x: {
+                        grid: {
+                            color: getComputedStyle(document.documentElement).getPropertyValue('--border-color')
+                        },
+                        ticks: {
+                            color: getComputedStyle(document.documentElement).getPropertyValue('--text-color')
+                        }
+                    }
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'index',
+                },
+                animation: {
+                    duration: 1000,
+                    easing: 'easeOutQuart'
+                }
+            }
+        });
+
+        // Refresh chart buttons
         document.getElementById('refreshChartBtn').addEventListener('click', function() {
             this.innerHTML = '<span class="loader"></span>';
             setTimeout(() => {
@@ -1491,9 +1848,18 @@ if (isset($loginLogs) && is_array($loginLogs)) {
             }, 1000);
         });
 
+        document.getElementById('refreshArchivedChartBtn').addEventListener('click', function() {
+            this.innerHTML = '<span class="loader"></span>';
+            setTimeout(() => {
+                archivedChart.update();
+                this.innerHTML = '<i class="fas fa-sync-alt"></i> Refresh';
+            }, 1000);
+        });
+
         // Update chart colors when theme changes
         themeSwitch.addEventListener('change', function() {
             setTimeout(() => {
+                // Update registration chart
                 registrationChart.options.plugins.tooltip.backgroundColor = getComputedStyle(document.documentElement).getPropertyValue('--card-bg');
                 registrationChart.options.plugins.tooltip.titleColor = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
                 registrationChart.options.plugins.tooltip.bodyColor = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
@@ -1504,6 +1870,18 @@ if (isset($loginLogs) && is_array($loginLogs)) {
                 registrationChart.options.scales.y.ticks.color = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
                 registrationChart.options.scales.x.ticks.color = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
                 registrationChart.update();
+                
+                // Update archived chart
+                archivedChart.options.plugins.tooltip.backgroundColor = getComputedStyle(document.documentElement).getPropertyValue('--card-bg');
+                archivedChart.options.plugins.tooltip.titleColor = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
+                archivedChart.options.plugins.tooltip.bodyColor = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
+                archivedChart.options.plugins.tooltip.borderColor = getComputedStyle(document.documentElement).getPropertyValue('--border-color');
+                archivedChart.options.plugins.legend.labels.color = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
+                archivedChart.options.scales.y.grid.color = getComputedStyle(document.documentElement).getPropertyValue('--border-color');
+                archivedChart.options.scales.x.grid.color = getComputedStyle(document.documentElement).getPropertyValue('--border-color');
+                archivedChart.options.scales.y.ticks.color = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
+                archivedChart.options.scales.x.ticks.color = getComputedStyle(document.documentElement).getPropertyValue('--text-color');
+                archivedChart.update();
             }, 300);
         });
     </script>

@@ -16,7 +16,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
         // Start transaction
         $conn->beginTransaction();
         
-        // Get user details before deletion for logging
+        // Get user details before archiving for logging
         $stmt = $conn->prepare("SELECT name, email, role FROM users WHERE id = ?");
         $stmt->execute([$userId]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -27,39 +27,79 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
         
         // Check if user is an admin
         if ($user['role'] === 'Admin' && $userId === $_SESSION['user_id']) {
-            throw new Exception("You cannot delete your own admin account");
+            throw new Exception("You cannot archive your own admin account");
         }
         
-        // Delete related records first (foreign key constraints)
-        // Delete remember tokens
-        $stmt = $conn->prepare("DELETE FROM remember_tokens WHERE user_id = ?");
-        $stmt->execute([$userId]);
+        // Check if archived_users table exists
+        $checkTableStmt = $conn->prepare("
+            SELECT COUNT(*) as table_exists 
+            FROM information_schema.tables 
+            WHERE table_schema = DATABASE() 
+            AND table_name = 'archived_users'
+        ");
+        $checkTableStmt->execute();
+        $tableExists = $checkTableStmt->fetch(PDO::FETCH_ASSOC)['table_exists'];
         
-        // If user is a trainer, delete trainer-member relationships
-        if ($user['role'] === 'Trainer') {
-            $stmt = $conn->prepare("DELETE FROM trainer_members WHERE trainer_id = ?");
-            $stmt->execute([$userId]);
-            
-            $stmt = $conn->prepare("DELETE FROM workouts WHERE trainer_id = ?");
-            $stmt->execute([$userId]);
+        // Create archived_users table if it doesn't exist (matching your existing structure)
+        if (!$tableExists) {
+            $createTableStmt = $conn->prepare("
+                CREATE TABLE archived_users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    original_id INT,
+                    name VARCHAR(100) NOT NULL,
+                    email VARCHAR(100) NOT NULL,
+                    password VARCHAR(255) NOT NULL,
+                    role ENUM('Admin','Trainer','Member') NOT NULL,
+                    created_at TIMESTAMP NULL,
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    archived_by INT NOT NULL,
+                    archive_reason VARCHAR(255) DEFAULT 'User archived by admin',
+                    restore_count INT DEFAULT 0,
+                    last_restore_date TIMESTAMP NULL,
+                    archive_notes TEXT
+                )
+            ");
+            $createTableStmt->execute();
         }
         
-        // If user is a member, delete trainer-member relationships and workouts
-        if ($user['role'] === 'Member') {
-            $stmt = $conn->prepare("DELETE FROM trainer_members WHERE member_id = ?");
-            $stmt->execute([$userId]);
-            
-            $stmt = $conn->prepare("DELETE FROM workouts WHERE member_id = ?");
-            $stmt->execute([$userId]);
+        // Get all user data to copy to archived_users table
+        $userDataStmt = $conn->prepare("SELECT * FROM users WHERE id = ?");
+        $userDataStmt->execute([$userId]);
+        $userData = $userDataStmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$userData) {
+            throw new Exception("Unable to retrieve user data");
         }
         
-        // Delete the user
-        $stmt = $conn->prepare("DELETE FROM users WHERE id = ?");
-        $stmt->execute([$userId]);
+        // Archive the user by copying data to archived_users table
+        $archiveStmt = $conn->prepare("
+            INSERT INTO archived_users 
+            (original_id, name, email, password, role, created_at, archived_by, archive_reason, archive_notes) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        
+        $archiveReason = isset($_POST['archive_reason']) ? $_POST['archive_reason'] : 'User archived by admin';
+        $archiveNotes = isset($_POST['archive_notes']) ? $_POST['archive_notes'] : null;
+        $adminId = $_SESSION['user_id'];
+        
+        $archiveStmt->execute([
+            $userId,
+            $userData['name'],
+            $userData['email'],
+            $userData['password'],
+            $userData['role'],
+            $userData['created_at'],
+            $adminId,
+            $archiveReason,
+            $archiveNotes
+        ]);
+        
+        // Update user status to 'Archived' instead of deleting
+        $updateStmt = $conn->prepare("UPDATE users SET status = 'Archived' WHERE id = ?");
+        $updateStmt->execute([$userId]);
         
         // Log the action
         $adminId = $_SESSION['user_id'];
-        $adminName = $_SESSION['name'];
         
         // Check the structure of admin_logs table to determine available columns
         $checkColumnsStmt = $conn->prepare("
@@ -87,7 +127,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
         }
         
         // Prepare log message
-        $logMessage = "Deleted user: " . $user['name'] . " (" . $user['email'] . ") with role " . $user['role'];
+        $logMessage = "Archived user: " . $user['name'] . " (" . $user['email'] . ") with role " . $user['role'];
         
         // Build dynamic SQL query based on available columns
         $sql = "INSERT INTO admin_logs (";
@@ -97,7 +137,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
         // Always include admin_id and action
         $sql .= "admin_id, action";
         $params[] = $adminId;
-        $params[] = "delete_user";
+        $params[] = "archive_user";
         $placeholders[] = "?";
         $placeholders[] = "?";
         
@@ -136,7 +176,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
         $conn->commit();
         
         // Set success message
-        $_SESSION['success_message'] = "User " . $user['name'] . " has been successfully deleted.";
+        $_SESSION['success_message'] = "User " . $user['name'] . " has been successfully archived.";
         
         // Redirect back to users page
         header("Location: users.php");
@@ -149,7 +189,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
         }
         
         // Set error message
-        $_SESSION['error_message'] = "Error deleting user: " . $e->getMessage();
+        $_SESSION['error_message'] = "Error archiving user: " . $e->getMessage();
         
         // Redirect back to users page
         header("Location: users.php");
@@ -160,4 +200,4 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['user_id'])) {
     header("Location: users.php");
     exit;
 }
-?>
+?>s
