@@ -37,6 +37,7 @@ try {
                 theme VARCHAR(20) DEFAULT 'light',
                 measurement_unit VARCHAR(20) DEFAULT 'metric',
                 email_notifications BOOLEAN DEFAULT TRUE,
+                gender ENUM('Male', 'Female', 'Other') DEFAULT NULL,
                 push_notifications BOOLEAN DEFAULT TRUE,
                 workout_reminders BOOLEAN DEFAULT TRUE,
                 profile_visibility VARCHAR(20) DEFAULT 'members',

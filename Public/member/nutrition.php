@@ -14,9 +14,9 @@ $profileImage = $_SESSION['profile_image'] ?? '';
 // Connect to database
 $conn = connectDB();
 
-// Get user settings
+// Get user settings with dark theme as default
 $settings = [
-    'theme' => 'light',
+    'theme' => 'dark', // Changed default to dark
     'measurement_unit' => 'metric'
 ];
 
@@ -29,6 +29,14 @@ try {
     if ($userSettings) {
         $settings['theme'] = $userSettings['theme'];
         $settings['measurement_unit'] = $userSettings['measurement_unit'];
+    } else {
+        // Insert default dark theme setting for new users
+        try {
+            $stmt = $conn->prepare("INSERT INTO member_settings (user_id, theme, measurement_unit) VALUES (?, ?, ?)");
+            $stmt->execute([$userId, 'dark', 'metric']);
+        } catch (PDOException $e) {
+            // Table might not exist, continue with defaults
+        }
     }
 } catch (PDOException $e) {
     // Handle error
@@ -79,7 +87,7 @@ try {
     $userNutrition = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($userNutrition) {
-        // FIX 1: Replace array_merge with manual merging
+        // Manual merging to replace array_merge
         foreach ($userNutrition as $key => $value) {
             if (isset($nutritionData[$key])) {
                 $nutritionData[$key] = $value;
@@ -229,35 +237,6 @@ try {
     $errorMessage = "Error setting up meal templates: " . $e->getMessage();
 }
 
-// Check if nutrition_logs table exists for tracking history
-try {
-    $tableExists = $conn->query("SHOW TABLES LIKE 'nutrition_logs'")->rowCount() > 0;
-    
-    if (!$tableExists) {
-        // Create nutrition_logs table
-        $conn->exec("
-            CREATE TABLE nutrition_logs (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                log_date DATE NOT NULL,
-                total_calories INT NOT NULL,
-                total_protein FLOAT NOT NULL,
-                total_carbs FLOAT NOT NULL,
-                total_fat FLOAT NOT NULL,
-                total_water INT NOT NULL,
-                weight FLOAT,
-                notes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                UNIQUE KEY (user_id, log_date)
-            )
-        ");
-    }
-} catch (PDOException $e) {
-    // Handle error
-    $errorMessage = "Error setting up nutrition logs: " . $e->getMessage();
-}
-
 // Get current date
 $currentDate = isset($_GET['date']) ? $_GET['date'] : date('Y-m-d');
 $displayDate = date('F j, Y', strtotime($currentDate));
@@ -347,22 +326,6 @@ try {
     $errorMessage = "Error loading meal templates: " . $e->getMessage();
 }
 
-// Get nutrition logs for the past week
-$nutritionHistory = [];
-try {
-    $stmt = $conn->prepare("
-        SELECT * FROM nutrition_logs 
-        WHERE user_id = ? 
-        AND log_date BETWEEN DATE_SUB(?, INTERVAL 7 DAY) AND ?
-        ORDER BY log_date
-    ");
-    $stmt->execute([$userId, $currentDate, $currentDate]);
-    $nutritionHistory = $stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (PDOException $e) {
-    // Handle error
-    $errorMessage = "Error loading nutrition history: " . $e->getMessage();
-}
-
 // Handle form submissions
 $message = '';
 $messageType = '';
@@ -383,51 +346,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $isFavorite = isset($_POST['is_favorite']) ? 1 : 0;
             $notes = $_POST['notes'] ?? '';
             
-            // Handle image upload if present
-            $mealImage = '';
-            if (isset($_FILES['meal_image']) && $_FILES['meal_image']['error'] == 0) {
-                $allowedTypes = ['image/jpeg', 'image/png', 'image/gif'];
-                $maxSize = 5 * 1024 * 1024; // 5MB
-                
-                // FIX 2: Replace in_array with manual check
-                $isAllowedType = false;
-                foreach ($allowedTypes as $type) {
-                    if ($_FILES['meal_image']['type'] === $type) {
-                        $isAllowedType = true;
-                        break;
-                    }
-                }
-                
-                if ($isAllowedType && $_FILES['meal_image']['size'] <= $maxSize) {
-                    $uploadDir = '../uploads/meals/';
-                    
-                    // Create directory if it doesn't exist
-                    if (!file_exists($uploadDir)) {
-                        mkdir($uploadDir, 0777, true);
-                    }
-                    
-                    $fileName = uniqid('meal_') . '_' . basename($_FILES['meal_image']['name']);
-                    $uploadPath = $uploadDir . $fileName;
-                    
-                    if (move_uploaded_file($_FILES['meal_image']['tmp_name'], $uploadPath)) {
-                        $mealImage = '/uploads/meals/' . $fileName;
-                    }
-                }
-            }
-            
             $stmt = $conn->prepare("
                 INSERT INTO meals (
                     user_id, meal_date, meal_type, name, calories, 
                     protein, carbs, fat, fiber, sugar, sodium, 
-                    is_favorite, meal_image, notes
+                    is_favorite, notes
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             
             $stmt->execute([
                 $userId, $currentDate, $mealType, $mealName, $calories,
                 $protein, $carbs, $fat, $fiber, $sugar, $sodium,
-                $isFavorite, $mealImage, $notes
+                $isFavorite, $notes
             ]);
             
             $message = 'Meal added successfully!';
@@ -438,43 +369,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         } catch (PDOException $e) {
             $message = 'Error adding meal: ' . $e->getMessage();
-            $messageType = 'error';
-        }
-    } elseif (isset($_POST['delete_meal'])) {
-        // Delete meal
-        try {
-            $mealId = $_POST['meal_id'] ?? 0;
-            
-            $stmt = $conn->prepare("DELETE FROM meals WHERE id = ? AND user_id = ?");
-            $stmt->execute([$mealId, $userId]);
-            
-            $message = 'Meal deleted successfully!';
-            $messageType = 'success';
-            
-            // Refresh page
-            header("Location: nutrition.php?date=$currentDate&deleted=1");
-            exit;
-        } catch (PDOException $e) {
-            $message = 'Error deleting meal: ' . $e->getMessage();
-            $messageType = 'error';
-        }
-    } elseif (isset($_POST['toggle_favorite'])) {
-        // Toggle favorite status
-        try {
-            $mealId = $_POST['meal_id'] ?? 0;
-            $isFavorite = $_POST['is_favorite'] ? 0 : 1; // Toggle current value
-            
-            $stmt = $conn->prepare("UPDATE meals SET is_favorite = ? WHERE id = ? AND user_id = ?");
-            $stmt->execute([$isFavorite, $mealId, $userId]);
-            
-            $message = $isFavorite ? 'Added to favorites!' : 'Removed from favorites!';
-            $messageType = 'success';
-            
-            // Refresh page
-            header("Location: nutrition.php?date=$currentDate&favorite_updated=1");
-            exit;
-        } catch (PDOException $e) {
-            $message = 'Error updating favorite status: ' . $e->getMessage();
             $messageType = 'error';
         }
     } elseif (isset($_POST['update_water'])) {
@@ -508,180 +402,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = 'Error updating water intake: ' . $e->getMessage();
             $messageType = 'error';
         }
-    } elseif (isset($_POST['update_nutrition_settings'])) {
-        // Update nutrition settings
-        try {
-            $dailyCalories = !empty($_POST['daily_calories']) ? (int)$_POST['daily_calories'] : 2000;
-            $proteinTarget = !empty($_POST['protein_target']) ? (int)$_POST['protein_target'] : 150;
-            $carbsTarget = !empty($_POST['carbs_target']) ? (int)$_POST['carbs_target'] : 200;
-            $fatTarget = !empty($_POST['fat_target']) ? (int)$_POST['fat_target'] : 65;
-            $waterTarget = !empty($_POST['water_target']) ? (int)$_POST['water_target'] : 2500;
-            $fiberTarget = !empty($_POST['fiber_target']) ? (int)$_POST['fiber_target'] : 30;
-            $sugarTarget = !empty($_POST['sugar_target']) ? (int)$_POST['sugar_target'] : 50;
-            
-            $stmt = $conn->prepare("
-                UPDATE nutrition_settings 
-                SET daily_calories = ?, protein_target = ?, carbs_target = ?, 
-                    fat_target = ?, water_target = ?, fiber_target = ?, sugar_target = ?
-                WHERE user_id = ?
-            ");
-            
-            $stmt->execute([
-                $dailyCalories, $proteinTarget, $carbsTarget, 
-                $fatTarget, $waterTarget, $fiberTarget, $sugarTarget,
-                $userId
-            ]);
-            
-            $message = 'Nutrition settings updated successfully!';
-            $messageType = 'success';
-            
-            // Update nutrition data in memory
-            $nutritionData['daily_calories'] = $dailyCalories;
-            $nutritionData['protein_target'] = $proteinTarget;
-            $nutritionData['carbs_target'] = $carbsTarget;
-            $nutritionData['fat_target'] = $fatTarget;
-            $nutritionData['water_target'] = $waterTarget;
-            $nutritionData['fiber_target'] = $fiberTarget;
-            $nutritionData['sugar_target'] = $sugarTarget;
-            
-            // Refresh page
-            header("Location: nutrition.php?date=$currentDate&settings_updated=1");
-            exit;
-        } catch (PDOException $e) {
-            $message = 'Error updating nutrition settings: ' . $e->getMessage();
-            $messageType = 'error';
-        }
-    } elseif (isset($_POST['save_template'])) {
-        // Save meal as template
-        try {
-            $mealId = $_POST['meal_id'] ?? 0;
-            
-            // Get meal data
-            $stmt = $conn->prepare("SELECT * FROM meals WHERE id = ? AND user_id = ?");
-            $stmt->execute([$mealId, $userId]);
-            $meal = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($meal) {
-                // Insert as template
-                $stmt = $conn->prepare("
-                    INSERT INTO meal_templates (
-                        name, meal_type, calories, protein, carbs, fat, 
-                        fiber, sugar, sodium, is_public, created_by
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ");
-                
-                $stmt->execute([
-                    $meal['name'], $meal['meal_type'], $meal['calories'], 
-                    $meal['protein'], $meal['carbs'], $meal['fat'],
-                    $meal['fiber'], $meal['sugar'], $meal['sodium'],
-                    0, $userId
-                ]);
-                
-                $message = 'Meal saved as template!';
-                $messageType = 'success';
-            }
-            
-            // Refresh page
-            header("Location: nutrition.php?date=$currentDate&template_saved=1");
-            exit;
-        } catch (PDOException $e) {
-            $message = 'Error saving template: ' . $e->getMessage();
-            $messageType = 'error';
-        }
-    } elseif (isset($_POST['use_template'])) {
-        // Use template to add meal
-        try {
-            $templateId = $_POST['template_id'] ?? 0;
-            
-            // Get template data
-            $stmt = $conn->prepare("SELECT * FROM meal_templates WHERE id = ?");
-            $stmt->execute([$templateId]);
-            $template = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($template) {
-                // Insert as meal
-                $stmt = $conn->prepare("
-                    INSERT INTO meals (
-                        user_id, meal_date, meal_type, name, calories, 
-                        protein, carbs, fat, fiber, sugar, sodium
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ");
-                
-                $stmt->execute([
-                    $userId, $currentDate, $template['meal_type'], $template['name'], 
-                    $template['calories'], $template['protein'], $template['carbs'], 
-                    $template['fat'], $template['fiber'], $template['sugar'], $template['sodium']
-                ]);
-                
-                $message = 'Meal added from template!';
-                $messageType = 'success';
-            }
-            
-            // Refresh page
-            header("Location: nutrition.php?date=$currentDate&template_used=1");
-            exit;
-        } catch (PDOException $e) {
-            $message = 'Error using template: ' . $e->getMessage();
-            $messageType = 'error';
-        }
-    } elseif (isset($_POST['save_log'])) {
-        // Save nutrition log
-        try {
-            $weight = !empty($_POST['weight']) ? (float)$_POST['weight'] : null;
-            $notes = $_POST['log_notes'] ?? '';
-            
-            // Check if log exists for this date
-            $stmt = $conn->prepare("SELECT id FROM nutrition_logs WHERE user_id = ? AND log_date = ?");
-            $stmt->execute([$userId, $currentDate]);
-            $exists = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($exists) {
-                // Update existing log
-                $stmt = $conn->prepare("
-                    UPDATE nutrition_logs 
-                    SET total_calories = ?, total_protein = ?, total_carbs = ?, 
-                        total_fat = ?, total_water = ?, weight = ?, notes = ?
-                    WHERE user_id = ? AND log_date = ?
-                ");
-                
-                $stmt->execute([
-                    $dailyTotals['calories'], $dailyTotals['protein'], 
-                    $dailyTotals['carbs'], $dailyTotals['fat'], 
-                    $waterIntake, $weight, $notes, $userId, $currentDate
-                ]);
-            } else {
-                // Insert new log
-                $stmt = $conn->prepare("
-                    INSERT INTO nutrition_logs (
-                        user_id, log_date, total_calories, total_protein, 
-                        total_carbs, total_fat, total_water, weight, notes
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ");
-                
-                $stmt->execute([
-                    $userId, $currentDate, $dailyTotals['calories'], 
-                    $dailyTotals['protein'], $dailyTotals['carbs'], 
-                    $dailyTotals['fat'], $waterIntake, $weight, $notes
-                ]);
-            }
-            
-            $message = 'Nutrition log saved!';
-            $messageType = 'success';
-            
-            // Refresh page
-            header("Location: nutrition.php?date=$currentDate&log_saved=1");
-            exit;
-        } catch (PDOException $e) {
-            $message = 'Error saving log: ' . $e->getMessage();
-            $messageType = 'error';
-        }
     }
 }
 
-// FIX 3: Replace min function with conditional logic for calculating percentages
 // Calculate percentages for progress bars
 $caloriesPercentage = 0;
 if ($nutritionData['daily_calories'] > 0) {
@@ -723,54 +446,14 @@ if ($nutritionData['water_target'] > 0) {
     }
 }
 
-$fiberPercentage = 0;
-if ($nutritionData['fiber_target'] > 0) {
-    $fiberPercentage = round(($dailyTotals['fiber'] / $nutritionData['fiber_target']) * 100);
-    if ($fiberPercentage > 100) {
-        $fiberPercentage = 100;
-    }
-}
-
-$sugarPercentage = 0;
-if ($nutritionData['sugar_target'] > 0) {
-    $sugarPercentage = round(($dailyTotals['sugar'] / $nutritionData['sugar_target']) * 100);
-    if ($sugarPercentage > 100) {
-        $sugarPercentage = 100;
-    }
-}
-
-// Calculate macronutrient percentages
+// Calculate macronutrient percentages for improved chart
 $totalMacros = $dailyTotals['protein'] * 4 + $dailyTotals['carbs'] * 4 + $dailyTotals['fat'] * 9;
 $proteinMacroPercentage = ($totalMacros > 0) ? round(($dailyTotals['protein'] * 4 / $totalMacros) * 100) : 0;
 $carbsMacroPercentage = ($totalMacros > 0) ? round(($dailyTotals['carbs'] * 4 / $totalMacros) * 100) : 0;
 $fatMacroPercentage = ($totalMacros > 0) ? round(($dailyTotals['fat'] * 9 / $totalMacros) * 100) : 0;
 
-// Get current theme
+// Get current theme (default to dark)
 $theme = $settings['theme'];
-
-// Helper function to format time ago
-function timeAgo($datetime) {
-    $timestamp = strtotime($datetime);
-    $difference = time() - $timestamp;
-    
-    if ($difference < 60) {
-        return "Just now";
-    } elseif ($difference < 3600) {
-        $minutes = round($difference / 60);
-        return $minutes . " minute" . ($minutes > 1 ? "s" : "") . " ago";
-    } elseif ($difference < 86400) {
-        $hours = round($difference / 3600);
-        return $hours . " hour" . ($hours > 1 ? "s" : "") . " ago";
-    } elseif ($difference < 604800) {
-        $days = round($difference / 86400);
-        return $days . " day" . ($days > 1 ? "s" : "") . " ago";
-    } elseif ($difference < 2592000) {
-        $weeks = round($difference / 604800);
-        return $weeks . " week" . ($weeks > 1 ? "s" : "") . " ago";
-    } else {
-        return date("M j, Y", $timestamp);
-    }
-}
 ?>
 
 <!DOCTYPE html>
@@ -779,1039 +462,783 @@ function timeAgo($datetime) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nutrition Tracker - EliteFit Gym</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.min.css">
     
-    <!-- Inline CSS Styles -->
     <style>
-        /* Variables */
         :root {
+            --primary: #ff6b35;
+            --primary-dark: #e55a2b;
+            --secondary: #2c3e50;
+            --success: #27ae60;
+            --warning: #f39c12;
+            --danger: #e74c3c;
+            --info: #3498db;
+            --light: #ecf0f1;
+            --dark: #2c3e50;
+            
             /* Light Theme */
             --bg-light: #f8f9fa;
-            --card-bg-light: #ffffff;
-            --text-light: #333333;
+            --card-light: #ffffff;
+            --text-light: #2c3e50;
             --text-secondary-light: #6c757d;
             --border-light: #dee2e6;
             --hover-light: #f1f3f5;
-            --primary-light: #ff6b00;
-            --primary-hover-light: #e05e00;
-            --success-light: #28a745;
-            --danger-light: #dc3545;
-            --warning-light: #ffc107;
-            --info-light: #17a2b8;
             
             /* Dark Theme */
-            --bg-dark: #121212;
-            --card-bg-dark: #1e1e1e;
+            --bg-dark: #0f0f0f;
+            --card-dark: #1a1a1a;
             --text-dark: #e0e0e0;
             --text-secondary-dark: #adb5bd;
-            --border-dark: #333333;
+            --border-dark: #2d2d2d;
             --hover-dark: #2a2a2a;
-            --primary-dark: #ff6b00;
-            --primary-hover-dark: #ff8c3f;
-            --success-dark: #28a745;
-            --danger-dark: #dc3545;
-            --warning-dark: #ffc107;
-            --info-dark: #17a2b8;
-            
-            /* Default Theme (Light) */
+        }
+
+        [data-theme="light"] {
             --bg: var(--bg-light);
-            --card-bg: var(--card-bg-light);
+            --card-bg: var(--card-light);
             --text: var(--text-light);
             --text-secondary: var(--text-secondary-light);
             --border: var(--border-light);
             --hover: var(--hover-light);
-            --primary: var(--primary-light);
-            --primary-hover: var(--primary-hover-light);
-            --success: var(--success-light);
-            --danger: var(--danger-light);
-            --warning: var(--warning-light);
-            --info: var(--info-light);
         }
-        
-        /* Dark Theme */
-        html[data-theme="dark"] {
+
+        [data-theme="dark"] {
             --bg: var(--bg-dark);
-            --card-bg: var(--card-bg-dark);
+            --card-bg: var(--card-dark);
             --text: var(--text-dark);
             --text-secondary: var(--text-secondary-dark);
             --border: var(--border-dark);
             --hover: var(--hover-dark);
-            --primary: var(--primary-dark);
-            --primary-hover: var(--primary-hover-dark);
-            --success: var(--success-dark);
-            --danger: var(--danger-dark);
-            --warning: var(--warning-dark);
-            --info: var(--info-dark);
         }
-        
-        /* Orange Theme */
-        html[data-theme="orange"] {
-            --bg: #fff9f2;
-            --card-bg: #ffffff;
-            --text: #333333;
-            --text-secondary: #6c757d;
-            --border: #ffcb9a;
-            --hover: #fff0e0;
-            --primary: #ff6b00;
-            --primary-hover: #e05e00;
-            --success: #28a745;
-            --danger: #dc3545;
-            --warning: #ffc107;
-            --info: #17a2b8;
-        }
-        
-        /* Base Styles */
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
-            font-family: 'Poppins', sans-serif;
-            background-color: var(--bg);
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
             color: var(--text);
             line-height: 1.6;
-            transition: background-color 0.3s ease, color 0.3s ease;
+            transition: all 0.3s ease;
         }
-        
-        a {
-            color: var(--primary);
-            text-decoration: none;
-            transition: color 0.3s ease;
-        }
-        
-        a:hover {
-            color: var(--primary-hover);
-        }
-        
-        /* Dashboard Container */
+
         .dashboard-container {
             display: flex;
             min-height: 100vh;
         }
-        
-        /* Sidebar */
+
         .sidebar {
-            width: 260px;
-            background-color: var(--card-bg);
+            width: 280px;
+            background: var(--card-bg);
             border-right: 1px solid var(--border);
-            padding: 1.5rem 0;
             position: fixed;
-            top: 0;
-            left: 0;
-            bottom: 0;
+            height: 100vh;
             overflow-y: auto;
-            transition: transform 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
-            z-index: 100;
+            transition: all 0.3s ease;
+            z-index: 1000;
         }
-        
+
         .sidebar-header {
+            padding: 2rem 1.5rem;
+            border-bottom: 1px solid var(--border);
             display: flex;
             align-items: center;
-            padding: 0 1.5rem;
-            margin-bottom: 2rem;
+            gap: 1rem;
         }
-        
+
         .sidebar-header i {
             color: var(--primary);
-            margin-right: 0.75rem;
+            font-size: 2rem;
         }
-        
+
         .sidebar-header h2 {
             font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--text);
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
-        
+
         .sidebar-user {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
             display: flex;
             align-items: center;
-            padding: 0 1.5rem;
-            margin-bottom: 2rem;
+            gap: 1rem;
         }
-        
+
         .user-avatar {
-            width: 40px;
-            height: 40px;
+            width: 50px;
+            height: 50px;
             border-radius: 50%;
             overflow: hidden;
-            margin-right: 0.75rem;
-            background-color: var(--primary);
+            background: var(--primary);
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
             font-weight: 600;
+            font-size: 1.2rem;
         }
-        
+
         .user-avatar img {
             width: 100%;
             height: 100%;
             object-fit: cover;
         }
-        
-        .avatar-placeholder {
-            width: 100%;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background-color: var(--primary);
-            color: white;
-            font-weight: 600;
-        }
-        
+
         .user-info h3 {
-            font-size: 0.9rem;
+            font-size: 1rem;
             font-weight: 600;
             margin-bottom: 0.25rem;
         }
-        
+
         .user-status {
-            font-size: 0.75rem;
-            color: var(--text-secondary);
-            background-color: var(--hover);
-            padding: 0.125rem 0.5rem;
-            border-radius: 0.25rem;
+            font-size: 0.875rem;
+            color: var(--primary);
+            background: rgba(255, 107, 53, 0.1);
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-weight: 500;
         }
-        
+
         .sidebar-menu {
             list-style: none;
-            padding: 0;
+            padding: 1rem 0;
         }
-        
+
         .sidebar-menu li {
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.5rem;
         }
-        
+
         .sidebar-menu a {
             display: flex;
             align-items: center;
-            padding: 0.75rem 1.5rem;
+            gap: 1rem;
+            padding: 0.875rem 1.5rem;
             color: var(--text);
-            transition: background-color 0.3s ease, color 0.3s ease;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border-radius: 0 2rem 2rem 0;
+            margin-right: 1rem;
         }
-        
-        .sidebar-menu a:hover {
-            background-color: var(--hover);
-            color: var(--primary);
-        }
-        
+
+        .sidebar-menu a:hover,
         .sidebar-menu a.active {
-            background-color: var(--hover);
-            color: var(--primary);
-            border-left: 3px solid var(--primary);
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: white;
+            transform: translateX(0.5rem);
         }
-        
-        .sidebar-menu a i {
-            margin-right: 0.75rem;
+
+        .sidebar-menu i {
             width: 20px;
             text-align: center;
         }
-        
-        /* Main Content */
+
         .main-content {
             flex: 1;
+            margin-left: 280px;
             padding: 2rem;
-            margin-left: 260px;
-            transition: margin-left 0.3s ease;
+            transition: all 0.3s ease;
         }
-        
-        /* Mobile Menu Toggle */
+
         .mobile-menu-toggle {
             display: none;
-            background: none;
-            border: none;
-            color: var(--text);
-            font-size: 1.5rem;
-            cursor: pointer;
             position: fixed;
             top: 1rem;
             right: 1rem;
-            z-index: 101;
-            transition: color 0.3s ease;
+            z-index: 1001;
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-size: 1.25rem;
         }
-        
-        .mobile-menu-toggle:hover {
-            color: var(--primary);
-        }
-        
-        /* Header */
+
         .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
         }
-        
+
         .header h1 {
-            font-size: 1.75rem;
-            font-weight: 600;
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
             margin-bottom: 0.5rem;
         }
-        
+
         .header p {
             color: var(--text-secondary);
         }
-        
+
         .header-actions {
             display: flex;
-            gap: 0.75rem;
-        }
-        
-        /* Cards */
-        .card {
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-            margin-bottom: 1.5rem;
-            overflow: hidden;
-            transition: background-color 0.3s ease, box-shadow 0.3s ease;
-        }
-        
-        .card-header {
-            display: flex;
-            justify-content: space-between;
             align-items: center;
-            padding: 1.25rem 1.5rem;
-            border-bottom: 1px solid var(--border);
+            gap: 1rem;
         }
-        
-        .card-header h3 {
-            font-size: 1.25rem;
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 0.75rem;
+            text-decoration: none;
             font-weight: 600;
-            margin: 0;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.875rem;
         }
-        
-        .card-content {
-            padding: 1.5rem;
+
+        .btn:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 107, 53, 0.3);
         }
-        
-        /* Date Navigation */
+
+        .btn-outline {
+            background: transparent;
+            border: 2px solid var(--border);
+            color: var(--text);
+        }
+
+        .btn-outline:hover {
+            background: var(--hover);
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+        }
+
         .date-nav {
             display: flex;
-            align-items: center;
             justify-content: space-between;
-            margin-bottom: 1.5rem;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            background: var(--card-bg);
+            border-radius: 1rem;
+            border: 1px solid var(--border);
         }
-        
+
         .date-nav-current {
-            font-size: 1.25rem;
-            font-weight: 600;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary);
         }
-        
+
         .date-nav-actions {
             display: flex;
             gap: 0.5rem;
         }
-        
-        /* Nutrition Summary */
+
         .nutrition-summary {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 1.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
         }
-        
+
         .summary-item {
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
-            padding: 1.25rem;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            background: var(--card-bg);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            transition: all 0.3s ease;
+            border: 1px solid var(--border);
+            position: relative;
+            overflow: hidden;
         }
-        
+
+        .summary-item::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+        }
+
         .summary-item:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            transform: translateY(-4px);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15);
         }
-        
+
         .summary-item-header {
             display: flex;
             align-items: center;
-            margin-bottom: 0.75rem;
+            margin-bottom: 1rem;
         }
-        
+
         .summary-item-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            border-radius: 1rem;
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-right: 0.75rem;
+            margin-right: 1rem;
             font-size: 1.25rem;
         }
-        
+
         .summary-item-title {
-            font-size: 0.9rem;
+            font-size: 1rem;
             font-weight: 600;
             color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
-        
+
         .summary-item-value {
-            font-size: 1.5rem;
+            font-size: 2.5rem;
             font-weight: 700;
             margin-bottom: 0.5rem;
+            color: var(--text);
         }
-        
+
         .summary-item-subtitle {
-            font-size: 0.8rem;
+            font-size: 0.875rem;
             color: var(--text-secondary);
+            margin-bottom: 1rem;
         }
-        
+
         .calories-icon {
-            background-color: rgba(255, 107, 0, 0.1);
+            background: rgba(255, 107, 53, 0.1);
             color: var(--primary);
         }
-        
+
         .protein-icon {
-            background-color: rgba(40, 167, 69, 0.1);
+            background: rgba(39, 174, 96, 0.1);
             color: var(--success);
         }
-        
+
         .carbs-icon {
-            background-color: rgba(23, 162, 184, 0.1);
+            background: rgba(52, 152, 219, 0.1);
             color: var(--info);
         }
-        
+
         .fat-icon {
-            background-color: rgba(255, 193, 7, 0.1);
+            background: rgba(243, 156, 18, 0.1);
             color: var(--warning);
         }
-        
-        .fiber-icon {
-            background-color: rgba(111, 66, 193, 0.1);
-            color: #6f42c1;
-        }
-        
-        .sugar-icon {
-            background-color: rgba(220, 53, 69, 0.1);
-            color: var(--danger);
-        }
-        
-        /* Progress Bars */
+
         .progress-container {
-            margin-top: 0.75rem;
+            margin-top: 1rem;
         }
-        
+
         .progress-bar {
-            height: 6px;
-            background-color: var(--hover);
-            border-radius: 3px;
+            height: 8px;
+            background: var(--hover);
+            border-radius: 4px;
             overflow: hidden;
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.5rem;
+            position: relative;
         }
-        
+
         .progress-fill {
             height: 100%;
-            border-radius: 3px;
-            transition: width 0.3s ease;
+            border-radius: 4px;
+            transition: width 0.8s ease;
+            position: relative;
         }
-        
+
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
         .progress-fill-calories {
-            background-color: var(--primary);
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
         }
-        
+
         .progress-fill-protein {
-            background-color: var(--success);
+            background: linear-gradient(135deg, var(--success), #1e8449);
         }
-        
+
         .progress-fill-carbs {
-            background-color: var(--info);
+            background: linear-gradient(135deg, var(--info), #2471a3);
         }
-        
+
         .progress-fill-fat {
-            background-color: var(--warning);
+            background: linear-gradient(135deg, var(--warning), #d68910);
         }
-        
+
         .progress-fill-water {
-            background-color: #3498db;
+            background: linear-gradient(135deg, #3498db, #2980b9);
         }
-        
-        .progress-fill-fiber {
-            background-color: #6f42c1;
-        }
-        
-        .progress-fill-sugar {
-            background-color: var(--danger);
-        }
-        
+
         .progress-text {
             display: flex;
             justify-content: space-between;
-            font-size: 0.75rem;
+            font-size: 0.875rem;
             color: var(--text-secondary);
+            font-weight: 500;
         }
-        
-        /* Macro Distribution Chart */
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            overflow: hidden;
+            transition: all 0.3s ease;
+            border: 1px solid var(--border);
+            margin-bottom: 2rem;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            background: rgba(255, 107, 53, 0.02);
+        }
+
+        .card-header h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .card-header i {
+            color: var(--primary);
+        }
+
+        .card-content {
+            padding: 1.5rem;
+        }
+
         .macro-chart-container {
             display: flex;
             flex-direction: column;
             align-items: center;
-            margin-bottom: 1.5rem;
+            margin-bottom: 2rem;
         }
-        
+
         .macro-chart {
-            width: 200px;
-            height: 200px;
+            width: 50px;
+            height: 50px;
             margin-bottom: 1rem;
+            position: relative;
         }
-        
+
         .macro-legend {
             display: flex;
-            gap: 1rem;
+            gap: 2rem;
             justify-content: center;
             flex-wrap: wrap;
         }
-        
+
         .macro-legend-item {
             display: flex;
             align-items: center;
-            font-size: 0.85rem;
-        }
-        
-        .macro-legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-            margin-right: 0.5rem;
-        }
-        
-        /* Meal Sections */
-        .meal-section {
-            margin-bottom: 2rem;
-        }
-        
-        .meal-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-        }
-        
-        .meal-title {
-            font-size: 1.1rem;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-        }
-        
-        .meal-title i {
-            margin-right: 0.5rem;
-            color: var(--primary);
-        }
-        
-        .meal-items {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 1rem;
-        }
-        
-        .meal-item {
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
-            padding: 1rem;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }
-        
-        .meal-item:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-        }
-        
-        .meal-item-info {
-            flex: 1;
-        }
-        
-        .meal-item-name {
+            font-size: 0.875rem;
             font-weight: 500;
-            margin-bottom: 0.25rem;
-            display: flex;
-            align-items: center;
         }
-        
-        .meal-item-name i.fa-star {
-            color: #ffc107;
-            margin-left: 0.5rem;
-            font-size: 0.85rem;
+
+        .macro-legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            margin-right: 0.75rem;
         }
-        
-        .meal-item-macros {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.75rem;
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            margin-bottom: 0.5rem;
-        }
-        
-        .meal-item-macro {
-            display: flex;
-            align-items: center;
-        }
-        
-        .meal-item-macro i {
-            margin-right: 0.25rem;
-            font-size: 0.75rem;
-        }
-        
-        .meal-item-image {
-            width: 60px;
-            height: 60px;
-            border-radius: 0.25rem;
-            overflow: hidden;
-            margin-right: 1rem;
-        }
-        
-        .meal-item-image img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        
-        .meal-item-actions {
-            display: flex;
-            gap: 0.5rem;
-        }
-        
-        .meal-item-notes {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            font-style: italic;
-            margin-top: 0.5rem;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-        
-        .meal-empty {
-            grid-column: 1 / -1;
-            padding: 1.5rem;
-            text-align: center;
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
-            color: var(--text-secondary);
-        }
-        
-        /* Water Tracker */
+
         .water-tracker {
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
-            padding: 1.5rem;
+            background: var(--card-bg);
+            border-radius: 1.5rem;
+            padding: 2rem;
             margin-bottom: 2rem;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            border: 1px solid var(--border);
         }
-        
+
         .water-tracker-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 1rem;
+            margin-bottom: 1.5rem;
         }
-        
+
         .water-tracker-title {
-            font-size: 1.1rem;
+            font-size: 1.25rem;
             font-weight: 600;
             display: flex;
             align-items: center;
+            gap: 0.75rem;
         }
-        
+
         .water-tracker-title i {
-            margin-right: 0.5rem;
             color: #3498db;
+            font-size: 1.5rem;
         }
-        
-        .water-tracker-content {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-        }
-        
-        .water-progress {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-        
+
         .water-glasses {
             display: flex;
             flex-wrap: wrap;
-            gap: 0.5rem;
-            margin-top: 1rem;
+            gap: 0.75rem;
+            margin-top: 1.5rem;
+            justify-content: center;
         }
-        
+
         .water-glass {
-            width: 30px;
-            height: 40px;
-            background-color: var(--hover);
-            border-radius: 0 0 15px 15px;
+            width: 40px;
+            height: 50px;
+            background: var(--hover);
+            border-radius: 0 0 20px 20px;
             position: relative;
             cursor: pointer;
-            transition: background-color 0.3s ease;
+            transition: all 0.3s ease;
+            border: 2px solid var(--border);
         }
-        
+
+        .water-glass:hover {
+            transform: scale(1.1);
+        }
+
         .water-glass.filled {
-            background-color: #3498db;
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            border-color: #3498db;
         }
-        
+
         .water-glass::before {
             content: '';
             position: absolute;
-            top: -5px;
-            left: 0;
-            right: 0;
-            height: 5px;
-            border-radius: 5px 5px 0 0;
-            background-color: inherit;
+            top: -8px;
+            left: -2px;
+            right: -2px;
+            height: 8px;
+            border-radius: 8px 8px 0 0;
+            background: inherit;
+            border: 2px solid;
+            border-color: inherit;
+            border-bottom: none;
         }
-        
-        .water-controls {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-            margin-top: 1rem;
-        }
-        
-        .water-amount {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #3498db;
-        }
-        
-        /* Nutrition History Chart */
-        .nutrition-history {
+
+        .meal-section {
             margin-bottom: 2rem;
         }
-        
-        .chart-container {
-            height: 300px;
-            margin-top: 1rem;
-        }
-        
-        .chart-legend {
+
+        .meal-header {
             display: flex;
-            justify-content: center;
-            gap: 1rem;
-            flex-wrap: wrap;
-            margin-top: 1rem;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding: 1rem 1.5rem;
+            background: var(--card-bg);
+            border-radius: 1rem;
+            border: 1px solid var(--border);
         }
-        
-        .chart-legend-item {
+
+        .meal-title {
+            font-size: 1.25rem;
+            font-weight: 600;
             display: flex;
             align-items: center;
-            font-size: 0.85rem;
+            gap: 0.75rem;
         }
-        
-        .chart-legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-            margin-right: 0.5rem;
-        }
-        
-        /* Tabs */
-        .tabs {
-            display: flex;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 1.5rem;
-        }
-        
-        .tab {
-            padding: 0.75rem 1.5rem;
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            transition: all 0.3s ease;
-        }
-        
-        .tab.active {
-            border-bottom-color: var(--primary);
+
+        .meal-title i {
             color: var(--primary);
-            font-weight: 500;
+            font-size: 1.5rem;
         }
-        
-        .tab-content {
-            display: none;
-        }
-        
-        .tab-content.active {
-            display: block;
-        }
-        
-        /* Meal Templates */
-        .templates-grid {
+
+        .meal-items {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 1rem;
-            margin-top: 1rem;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 1.5rem;
         }
-        
-        .template-card {
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
-            padding: 1rem;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }
-        
-        .template-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-        }
-        
-        .template-header {
+
+        .meal-item {
+            background: var(--card-bg);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            margin-bottom: 0.75rem;
-        }
-        
-        .template-title {
-            font-weight: 500;
-        }
-        
-        .template-type {
-            font-size: 0.75rem;
-            color: var(--text-secondary);
-            background-color: var(--hover);
-            padding: 0.125rem 0.5rem;
-            border-radius: 0.25rem;
-        }
-        
-        .template-macros {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            margin-bottom: 0.75rem;
-        }
-        
-        .template-macro {
-            display: flex;
-            align-items: center;
-        }
-        
-        .template-macro i {
-            margin-right: 0.25rem;
-            font-size: 0.75rem;
-        }
-        
-        .template-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 0.5rem;
-        }
-        
-        /* Favorites */
-        .favorites-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 1rem;
-            margin-top: 1rem;
-        }
-        
-        /* Forms */
-        .form-group {
-            margin-bottom: 1.5rem;
-        }
-        
-        .form-group label {
-            display: block;
-            margin-bottom: 0.5rem;
-            font-weight: 500;
-        }
-        
-        .form-control {
-            width: 100%;
-            padding: 0.75rem 1rem;
-            font-size: 0.9rem;
+            transition: all 0.3s ease;
             border: 1px solid var(--border);
-            border-radius: 0.375rem;
-            background-color: var(--card-bg);
-            color: var(--text);
-            transition: border-color 0.3s ease, box-shadow 0.3s ease;
         }
-        
-        .form-control:focus {
-            border-color: var(--primary);
-            outline: none;
-            box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.25);
+
+        .meal-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
         }
-        
-        .form-control::placeholder {
-            color: var(--text-secondary);
+
+        .meal-item-info {
+            flex: 1;
         }
-        
-        .form-text {
-            margin-top: 0.25rem;
-            font-size: 0.75rem;
-            color: var(--text-secondary);
-        }
-        
-        .form-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-        }
-        
-        .form-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 0.75rem;
-            margin-top: 1.5rem;
-        }
-        
-        .form-check {
+
+        .meal-item-name {
+            font-weight: 600;
+            margin-bottom: 0.75rem;
             display: flex;
             align-items: center;
-            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
         }
-        
-        .form-check-input {
-            margin-right: 0.5rem;
-        }
-        
-        /* Buttons */
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0.5rem 1rem;
-            font-size: 0.9rem;
-            font-weight: 500;
-            border-radius: 0.375rem;
-            border: none;
-            cursor: pointer;
-            transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
-        }
-        
-        .btn i {
-            margin-right: 0.5rem;
-        }
-        
-        .btn-primary {
-            background-color: var(--primary);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            background-color: var(--primary-hover);
-            color: white;
-        }
-        
-        .btn-outline {
-            background-color: transparent;
-            border: 1px solid var(--border);
-            color: var(--text);
-        }
-        
-        .btn-outline:hover {
-            background-color: var(--hover);
-            color: var(--primary);
-            border-color: var(--primary);
-        }
-        
-        .btn-danger {
-            background-color: var(--danger);
-            color: white;
-        }
-        
-        .btn-danger:hover {
-            background-color: #bd2130;
-            color: white;
-        }
-        
-        .btn-sm {
-            padding: 0.25rem 0.75rem;
-            font-size: 0.8rem;
-        }
-        
-        .btn-lg {
-            padding: 0.75rem 1.5rem;
+
+        .meal-item-name i.fa-star {
+            color: #ffc107;
+            margin-left: 0.5rem;
             font-size: 1rem;
         }
-        
+
+        .meal-item-macros {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+        }
+
+        .meal-item-macro {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            background: var(--hover);
+            border-radius: 0.5rem;
+        }
+
+        .meal-item-macro i {
+            color: var(--primary);
+            width: 16px;
+        }
+
+        .meal-item-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-left: 1rem;
+        }
+
         .btn-icon {
-            width: 2rem;
-            height: 2rem;
-            display: inline-flex;
+            width: 40px;
+            height: 40px;
+            display: flex;
             align-items: center;
             justify-content: center;
             border-radius: 50%;
-            background-color: transparent;
+            background: var(--hover);
             color: var(--text);
             border: none;
             cursor: pointer;
-            transition: background-color 0.3s ease, color 0.3s ease;
+            transition: all 0.3s ease;
         }
-        
+
         .btn-icon:hover {
-            background-color: var(--hover);
-            color: var(--primary);
+            background: var(--primary);
+            color: white;
+            transform: scale(1.1);
         }
-        
-        /* Modals */
+
+        .meal-empty {
+            grid-column: 1 / -1;
+            padding: 3rem;
+            text-align: center;
+            background: var(--card-bg);
+            border-radius: 1rem;
+            color: var(--text-secondary);
+            border: 2px dashed var(--border);
+        }
+
+        .meal-empty i {
+            font-size: 3rem;
+            color: var(--primary);
+            margin-bottom: 1rem;
+        }
+
         .modal {
             position: fixed;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: rgba(0, 0, 0, 0.5);
+            background: rgba(0, 0, 0, 0.7);
             display: flex;
             align-items: center;
             justify-content: center;
-            z-index: 1000;
+            z-index: 2000;
             opacity: 0;
             visibility: hidden;
-            transition: opacity 0.3s ease, visibility 0.3s ease;
+            transition: all 0.3s ease;
         }
-        
+
         .modal.show {
             opacity: 1;
             visibility: visible;
         }
-        
+
         .modal-content {
-            background-color: var(--card-bg);
-            border-radius: 0.5rem;
+            background: var(--card-bg);
+            border-radius: 1.5rem;
             width: 100%;
             max-width: 600px;
             max-height: 90vh;
             overflow-y: auto;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             transform: translateY(-20px);
             transition: transform 0.3s ease;
+            border: 1px solid var(--border);
         }
-        
+
         .modal.show .modal-content {
             transform: translateY(0);
         }
-        
+
         .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 1.25rem 1.5rem;
+            padding: 1.5rem;
             border-bottom: 1px solid var(--border);
         }
-        
+
         .modal-header h4 {
-            font-size: 1.25rem;
+            font-size: 1.5rem;
             font-weight: 600;
             margin: 0;
         }
-        
+
         .modal-close {
             background: none;
             border: none;
@@ -1819,51 +1246,104 @@ function timeAgo($datetime) {
             font-size: 1.5rem;
             cursor: pointer;
             transition: color 0.3s ease;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-        
+
         .modal-close:hover {
             color: var(--primary);
+            background: var(--hover);
         }
-        
+
         .modal-body {
             padding: 1.5rem;
         }
-        
+
         .modal-footer {
             display: flex;
             justify-content: flex-end;
-            gap: 0.75rem;
-            padding: 1.25rem 1.5rem;
+            gap: 1rem;
+            padding: 1.5rem;
             border-top: 1px solid var(--border);
         }
-        
-        /* Alerts */
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 0.875rem 1rem;
+            font-size: 0.875rem;
+            border: 2px solid var(--border);
+            border-radius: 0.75rem;
+            background: var(--card-bg);
+            color: var(--text);
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            border-color: var(--primary);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.1);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+
+        .form-check {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .form-check-input {
+            margin-right: 0.75rem;
+            width: 18px;
+            height: 18px;
+        }
+
         .alert {
             display: flex;
             align-items: center;
-            padding: 1rem;
-            border-radius: 0.375rem;
+            padding: 1rem 1.5rem;
+            border-radius: 0.75rem;
             margin-bottom: 1.5rem;
-            font-size: 0.9rem;
+            font-size: 0.875rem;
+            font-weight: 500;
         }
-        
+
         .alert i {
             margin-right: 0.75rem;
             font-size: 1.25rem;
         }
-        
+
         .alert-success {
-            background-color: rgba(40, 167, 69, 0.1);
+            background: rgba(39, 174, 96, 0.1);
             color: var(--success);
-            border: 1px solid rgba(40, 167, 69, 0.2);
+            border: 1px solid rgba(39, 174, 96, 0.2);
         }
-        
+
         .alert-error {
-            background-color: rgba(220, 53, 69, 0.1);
+            background: rgba(231, 76, 60, 0.1);
             color: var(--danger);
-            border: 1px solid rgba(220, 53, 69, 0.2);
+            border: 1px solid rgba(231, 76, 60, 0.2);
         }
-        
+
         .alert .close {
             margin-left: auto;
             background: none;
@@ -1871,123 +1351,62 @@ function timeAgo($datetime) {
             color: inherit;
             font-size: 1.25rem;
             cursor: pointer;
-            opacity: 0.5;
+            opacity: 0.7;
             transition: opacity 0.3s ease;
         }
-        
+
         .alert .close:hover {
             opacity: 1;
         }
-        
-        /* Tooltips */
-        .tooltip {
-            position: relative;
-            display: inline-block;
-        }
-        
-        .tooltip .tooltip-text {
-            visibility: hidden;
-            width: 120px;
-            background-color: var(--text);
-            color: var(--card-bg);
-            text-align: center;
-            border-radius: 6px;
-            padding: 5px;
-            position: absolute;
-            z-index: 1;
-            bottom: 125%;
-            left: 50%;
-            margin-left: -60px;
-            opacity: 0;
-            transition: opacity 0.3s;
-            font-size: 0.75rem;
-        }
-        
-        .tooltip .tooltip-text::after {
-            content: "";
-            position: absolute;
-            top: 100%;
-            left: 50%;
-            margin-left: -5px;
-            border-width: 5px;
-            border-style: solid;
-            border-color: var(--text) transparent transparent transparent;
-        }
-        
-        .tooltip:hover .tooltip-text {
-            visibility: visible;
-            opacity: 1;
-        }
-        
-        /* Responsive Styles */
-        @media (max-width: 992px) {
-            .nutrition-summary {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            
-            .form-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .templates-grid, .favorites-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-        
+
         @media (max-width: 768px) {
             .sidebar {
                 transform: translateX(-100%);
-                z-index: 1000;
             }
-            
+
             .sidebar.show {
                 transform: translateX(0);
             }
-            
+
             .main-content {
                 margin-left: 0;
-                padding: 1.5rem;
+                padding: 1rem;
             }
-            
+
             .mobile-menu-toggle {
                 display: block;
             }
-            
+
             .header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .header-actions {
-                margin-top: 1rem;
-                width: 100%;
-            }
-            
-            .nutrition-summary {
-                grid-template-columns: 1fr;
-            }
-            
-            .meal-items {
-                grid-template-columns: 1fr;
-            }
-            
-            .date-nav {
                 flex-direction: column;
                 align-items: flex-start;
                 gap: 1rem;
             }
-            
-            .date-nav-actions {
-                width: 100%;
-                justify-content: space-between;
-            }
-            
-            .templates-grid, .favorites-grid {
+
+            .nutrition-summary {
                 grid-template-columns: 1fr;
             }
-            
-            .modal-content {
-                max-width: 90%;
+
+            .meal-items {
+                grid-template-columns: 1fr;
+            }
+
+            .date-nav {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .macro-legend {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .water-glasses {
+                justify-content: center;
             }
         }
     </style>
@@ -1997,7 +1416,7 @@ function timeAgo($datetime) {
         <!-- Sidebar -->
         <div class="sidebar" id="sidebar">
             <div class="sidebar-header">
-                <i class="fas fa-dumbbell fa-2x"></i>
+                <i class="fas fa-dumbbell"></i>
                 <h2>EliteFit Gym</h2>
             </div>
             <div class="sidebar-user">
@@ -2005,9 +1424,7 @@ function timeAgo($datetime) {
                     <?php if (!empty($profileImage)): ?>
                         <img src="<?php echo htmlspecialchars($profileImage); ?>" alt="Profile">
                     <?php else: ?>
-                        <div class="avatar-placeholder">
-                            <?php echo strtoupper(substr($userName, 0, 1)); ?>
-                        </div>
+                        <?php echo strtoupper(substr($userName, 0, 1)); ?>
                     <?php endif; ?>
                 </div>
                 <div class="user-info">
@@ -2042,14 +1459,11 @@ function timeAgo($datetime) {
                     <p>Track your meals and monitor your nutritional intake</p>
                 </div>
                 <div class="header-actions">
-                    <button class="btn btn-primary" id="addMealBtn">
+                    <button class="btn" id="addMealBtn">
                         <i class="fas fa-plus"></i> Add Meal
                     </button>
-                    <button class="btn btn-outline" id="nutritionSettingsBtn">
-                        <i class="fas fa-sliders-h"></i> Settings
-                    </button>
-                    <button class="btn btn-outline" id="saveLogBtn">
-                        <i class="fas fa-save"></i> Save Log
+                    <button class="btn btn-outline" id="updateWaterBtn">
+                        <i class="fas fa-tint"></i> Water
                     </button>
                 </div>
             </div>
@@ -2069,414 +1483,232 @@ function timeAgo($datetime) {
                 </div>
                 <div class="date-nav-actions">
                     <a href="nutrition.php?date=<?php echo $previousDate; ?>" class="btn btn-outline btn-sm">
-                        <i class="fas fa-chevron-left"></i> Previous Day
+                        <i class="fas fa-chevron-left"></i> Previous
                     </a>
                     <a href="nutrition.php" class="btn btn-outline btn-sm">
                         <i class="fas fa-calendar-day"></i> Today
                     </a>
                     <a href="nutrition.php?date=<?php echo $nextDate; ?>" class="btn btn-outline btn-sm">
-                        Next Day <i class="fas fa-chevron-right"></i>
+                        Next <i class="fas fa-chevron-right"></i>
                     </a>
                 </div>
             </div>
             
-            <!-- Tabs -->
-            <div class="tabs">
-                <div class="tab active" data-tab="daily">Daily Tracker</div>
-                <div class="tab" data-tab="templates">Meal Templates</div>
-                <div class="tab" data-tab="favorites">My Favorites</div>
-                <div class="tab" data-tab="reports">Reports</div>
+            <!-- Nutrition Summary -->
+            <div class="nutrition-summary">
+                <div class="summary-item">
+                    <div class="summary-item-header">
+                        <div class="summary-item-icon calories-icon">
+                            <i class="fas fa-fire"></i>
+                        </div>
+                        <div class="summary-item-title">Calories</div>
+                    </div>
+                    <div class="summary-item-value"><?php echo $dailyTotals['calories']; ?></div>
+                    <div class="summary-item-subtitle">of <?php echo $nutritionData['daily_calories']; ?> kcal</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill progress-fill-calories" style="width: <?php echo $caloriesPercentage; ?>%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span><?php echo $caloriesPercentage; ?>%</span>
+                            <span><?php echo $dailyTotals['calories']; ?> / <?php echo $nutritionData['daily_calories']; ?> kcal</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="summary-item">
+                    <div class="summary-item-header">
+                        <div class="summary-item-icon protein-icon">
+                            <i class="fas fa-drumstick-bite"></i>
+                        </div>
+                        <div class="summary-item-title">Protein</div>
+                    </div>
+                    <div class="summary-item-value"><?php echo $dailyTotals['protein']; ?>g</div>
+                    <div class="summary-item-subtitle">of <?php echo $nutritionData['protein_target']; ?>g</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill progress-fill-protein" style="width: <?php echo $proteinPercentage; ?>%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span><?php echo $proteinPercentage; ?>%</span>
+                            <span><?php echo $dailyTotals['protein']; ?> / <?php echo $nutritionData['protein_target']; ?>g</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="summary-item">
+                    <div class="summary-item-header">
+                        <div class="summary-item-icon carbs-icon">
+                            <i class="fas fa-bread-slice"></i>
+                        </div>
+                        <div class="summary-item-title">Carbs</div>
+                    </div>
+                    <div class="summary-item-value"><?php echo $dailyTotals['carbs']; ?>g</div>
+                    <div class="summary-item-subtitle">of <?php echo $nutritionData['carbs_target']; ?>g</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill progress-fill-carbs" style="width: <?php echo $carbsPercentage; ?>%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span><?php echo $carbsPercentage; ?>%</span>
+                            <span><?php echo $dailyTotals['carbs']; ?> / <?php echo $nutritionData['carbs_target']; ?>g</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="summary-item">
+                    <div class="summary-item-header">
+                        <div class="summary-item-icon fat-icon">
+                            <i class="fas fa-cheese"></i>
+                        </div>
+                        <div class="summary-item-title">Fat</div>
+                    </div>
+                    <div class="summary-item-value"><?php echo $dailyTotals['fat']; ?>g</div>
+                    <div class="summary-item-subtitle">of <?php echo $nutritionData['fat_target']; ?>g</div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill progress-fill-fat" style="width: <?php echo $fatPercentage; ?>%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span><?php echo $fatPercentage; ?>%</span>
+                            <span><?php echo $dailyTotals['fat']; ?> / <?php echo $nutritionData['fat_target']; ?>g</span>
+                        </div>
+                    </div>
+                </div>
             </div>
             
-            <!-- Daily Tracker Tab -->
-            <div class="tab-content active" id="daily-tab">
-                <!-- Nutrition Summary -->
-                <div class="nutrition-summary">
-                    <div class="summary-item">
-                        <div class="summary-item-header">
-                            <div class="summary-item-icon calories-icon">
-                                <i class="fas fa-fire"></i>
+            <!-- Enhanced Macro Distribution Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-pie"></i> Macronutrient Distribution</h3>
+                </div>
+                <div class="card-content">
+                    <div class="macro-chart-container">
+                        <canvas id="macroChart" class="macro-chart"></canvas>
+                        <div class="macro-legend">
+                            <div class="macro-legend-item">
+                                <div class="macro-legend-color" style="background: linear-gradient(135deg, #27ae60, #1e8449);"></div>
+                                <span>Protein: <?php echo $proteinMacroPercentage; ?>% (<?php echo $dailyTotals['protein']; ?>g)</span>
                             </div>
-                            <div class="summary-item-title">Calories</div>
-                        </div>
-                        <div class="summary-item-value"><?php echo $dailyTotals['calories']; ?></div>
-                        <div class="summary-item-subtitle">of <?php echo $nutritionData['daily_calories']; ?> kcal</div>
-                        <div class="progress-container">
-                            <div class="progress-bar">
-                                <div class="progress-fill progress-fill-calories" style="width: <?php echo $caloriesPercentage; ?>%"></div>
+                            <div class="macro-legend-item">
+                                <div class="macro-legend-color" style="background: linear-gradient(135deg, #3498db, #2471a3);"></div>
+                                <span>Carbs: <?php echo $carbsMacroPercentage; ?>% (<?php echo $dailyTotals['carbs']; ?>g)</span>
                             </div>
-                            <div class="progress-text">
-                                <span><?php echo $caloriesPercentage; ?>%</span>
-                                <span><?php echo $dailyTotals['calories']; ?> / <?php echo $nutritionData['daily_calories']; ?> kcal</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="summary-item">
-                        <div class="summary-item-header">
-                            <div class="summary-item-icon protein-icon">
-                                <i class="fas fa-drumstick-bite"></i>
-                            </div>
-                            <div class="summary-item-title">Protein</div>
-                        </div>
-                        <div class="summary-item-value"><?php echo $dailyTotals['protein']; ?>g</div>
-                        <div class="summary-item-subtitle">of <?php echo $nutritionData['protein_target']; ?>g</div>
-                        <div class="progress-container">
-                            <div class="progress-bar">
-                                <div class="progress-fill progress-fill-protein" style="width: <?php echo $proteinPercentage; ?>%"></div>
-                            </div>
-                            <div class="progress-text">
-                                <span><?php echo $proteinPercentage; ?>%</span>
-                                <span><?php echo $dailyTotals['protein']; ?> / <?php echo $nutritionData['protein_target']; ?>g</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="summary-item">
-                        <div class="summary-item-header">
-                            <div class="summary-item-icon carbs-icon">
-                                <i class="fas fa-bread-slice"></i>
-                            </div>
-                            <div class="summary-item-title">Carbs</div>
-                        </div>
-                        <div class="summary-item-value"><?php echo $dailyTotals['carbs']; ?>g</div>
-                        <div class="summary-item-subtitle">of <?php echo $nutritionData['carbs_target']; ?>g</div>
-                        <div class="progress-container">
-                            <div class="progress-bar">
-                                <div class="progress-fill progress-fill-carbs" style="width: <?php echo $carbsPercentage; ?>%"></div>
-                            </div>
-                            <div class="progress-text">
-                                <span><?php echo $carbsPercentage; ?>%</span>
-                                <span><?php echo $dailyTotals['carbs']; ?> / <?php echo $nutritionData['carbs_target']; ?>g</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="summary-item">
-                        <div class="summary-item-header">
-                            <div class="summary-item-icon fat-icon">
-                                <i class="fas fa-cheese"></i>
-                            </div>
-                            <div class="summary-item-title">Fat</div>
-                        </div>
-                        <div class="summary-item-value"><?php echo $dailyTotals['fat']; ?>g</div>
-                        <div class="summary-item-subtitle">of <?php echo $nutritionData['fat_target']; ?>g</div>
-                        <div class="progress-container">
-                            <div class="progress-bar">
-                                <div class="progress-fill progress-fill-fat" style="width: <?php echo $fatPercentage; ?>%"></div>
-                            </div>
-                            <div class="progress-text">
-                                <span><?php echo $fatPercentage; ?>%</span>
-                                <span><?php echo $dailyTotals['fat']; ?> / <?php echo $nutritionData['fat_target']; ?>g</span>
+                            <div class="macro-legend-item">
+                                <div class="macro-legend-color" style="background: linear-gradient(135deg, #f39c12, #d68910);"></div>
+                                <span>Fat: <?php echo $fatMacroPercentage; ?>% (<?php echo $dailyTotals['fat']; ?>g)</span>
                             </div>
                         </div>
                     </div>
                 </div>
-                
-                <!-- Macro Distribution Chart -->
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Macronutrient Distribution</h3>
+            </div>
+            
+            <!-- Enhanced Water Tracker -->
+            <div class="water-tracker">
+                <div class="water-tracker-header">
+                    <div class="water-tracker-title">
+                        <i class="fas fa-tint"></i> Water Intake
                     </div>
-                    <div class="card-content">
-                        <div class="macro-chart-container">
-                            <canvas id="macroChart" class="macro-chart"></canvas>
-                            <div class="macro-legend">
-                                <div class="macro-legend-item">
-                                    <div class="macro-legend-color" style="background-color: #28a745;"></div>
-                                    <span>Protein: <?php echo $proteinMacroPercentage; ?>%</span>
-                                </div>
-                                <div class="macro-legend-item">
-                                    <div class="macro-legend-color" style="background-color: #17a2b8;"></div>
-                                    <span>Carbs: <?php echo $carbsMacroPercentage; ?>%</span>
-                                </div>
-                                <div class="macro-legend-item">
-                                    <div class="macro-legend-color" style="background-color: #ffc107;"></div>
-                                    <span>Fat: <?php echo $fatMacroPercentage; ?>%</span>
-                                </div>
-                            </div>
-                        </div>
+                    <button class="btn btn-outline btn-sm" id="updateWaterBtn2">
+                        <i class="fas fa-sync-alt"></i> Update
+                    </button>
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill progress-fill-water" style="width: <?php echo $waterPercentage; ?>%"></div>
+                    </div>
+                    <div class="progress-text">
+                        <span><?php echo $waterPercentage; ?>%</span>
+                        <span><?php echo $waterIntake; ?> / <?php echo $nutritionData['water_target']; ?> ml</span>
                     </div>
                 </div>
-                
-                <!-- Water Tracker -->
-                <div class="water-tracker">
-                    <div class="water-tracker-header">
-                        <div class="water-tracker-title">
-                            <i class="fas fa-tint"></i> Water Intake
+                <div class="water-glasses">
+                    <?php for ($i = 1; $i <= 8; $i++): ?>
+                        <div class="water-glass <?php echo $i <= floor($waterIntake / 300) ? 'filled' : ''; ?>" data-glass="<?php echo $i; ?>"></div>
+                    <?php endfor; ?>
+                </div>
+            </div>
+            
+            <!-- Meal Sections -->
+            <?php foreach ($mealTypes as $mealType): ?>
+                <div class="meal-section">
+                    <div class="meal-header">
+                        <div class="meal-title">
+                            <?php if ($mealType === 'Breakfast'): ?>
+                                <i class="fas fa-coffee"></i>
+                            <?php elseif ($mealType === 'Lunch'): ?>
+                                <i class="fas fa-utensils"></i>
+                            <?php elseif ($mealType === 'Dinner'): ?>
+                                <i class="fas fa-utensil-spoon"></i>
+                            <?php else: ?>
+                                <i class="fas fa-cookie"></i>
+                            <?php endif; ?>
+                            <?php echo $mealType; ?>
                         </div>
-                        <button class="btn btn-outline btn-sm" id="updateWaterBtn">
-                            <i class="fas fa-sync-alt"></i> Update
+                        <button class="btn btn-sm add-meal-btn" data-meal-type="<?php echo $mealType; ?>">
+                            <i class="fas fa-plus"></i> Add
                         </button>
                     </div>
-                    <div class="water-tracker-content">
-                        <div class="progress-container">
-                            <div class="progress-bar">
-                                <div class="progress-fill progress-fill-water" style="width: <?php echo $waterPercentage; ?>%"></div>
-                            </div>
-                            <div class="progress-text">
-                                <span><?php echo $waterPercentage; ?>%</span>
-                                <span><?php echo $waterIntake; ?> / <?php echo $nutritionData['water_target']; ?> ml</span>
-                            </div>
-                        </div>
-                        <div class="water-glasses">
-                            <?php for ($i = 1; $i <= 8; $i++): ?>
-                                <div class="water-glass <?php echo $i <= floor($waterIntake / 300) ? 'filled' : ''; ?>" data-glass="<?php echo $i; ?>"></div>
-                            <?php endfor; ?>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Meal Sections -->
-                <?php foreach ($mealTypes as $mealType): ?>
-                    <div class="meal-section">
-                        <div class="meal-header">
-                            <div class="meal-title">
-                                <?php if ($mealType === 'Breakfast'): ?>
-                                    <i class="fas fa-coffee"></i>
-                                <?php elseif ($mealType === 'Lunch'): ?>
-                                    <i class="fas fa-utensils"></i>
-                                <?php elseif ($mealType === 'Dinner'): ?>
-                                    <i class="fas fa-utensil-spoon"></i>
-                                <?php else: ?>
-                                    <i class="fas fa-cookie"></i>
-                                <?php endif; ?>
-                                <?php echo $mealType; ?>
-                            </div>
-                            <button class="btn btn-outline btn-sm add-meal-btn" data-meal-type="<?php echo $mealType; ?>">
-                                <i class="fas fa-plus"></i> Add
-                            </button>
-                        </div>
-                        <div class="meal-items">
-                            <?php if (isset($meals[$mealType]) && !empty($meals[$mealType])): ?>
-                                <?php foreach ($meals[$mealType] as $meal): ?>
-                                    <div class="meal-item">
-                                        <?php if (!empty($meal['meal_image'])): ?>
-                                            <div class="meal-item-image">
-                                                <img src="<?php echo htmlspecialchars($meal['meal_image']); ?>" alt="<?php echo htmlspecialchars($meal['name']); ?>">
-                                            </div>
-                                        <?php endif; ?>
-                                        <div class="meal-item-info">
-                                            <div class="meal-item-name">
-                                                <?php echo htmlspecialchars($meal['name']); ?>
-                                                <?php if ($meal['is_favorite']): ?>
-                                                    <i class="fas fa-star"></i>
-                                                <?php endif; ?>
-                                            </div>
-                                            <div class="meal-item-macros">
-                                                <div class="meal-item-macro">
-                                                    <i class="fas fa-fire"></i> <?php echo $meal['calories']; ?> kcal
-                                                </div>
-                                                <div class="meal-item-macro">
-                                                    <i class="fas fa-drumstick-bite"></i> <?php echo $meal['protein']; ?>g
-                                                </div>
-                                                <div class="meal-item-macro">
-                                                    <i class="fas fa-bread-slice"></i> <?php echo $meal['carbs']; ?>g
-                                                </div>
-                                                <div class="meal-item-macro">
-                                                    <i class="fas fa-cheese"></i> <?php echo $meal['fat']; ?>g
-                                                </div>
-                                            </div>
-                                            <?php if (!empty($meal['notes'])): ?>
-                                                <div class="meal-item-notes"><?php echo htmlspecialchars($meal['notes']); ?></div>
+                    <div class="meal-items">
+                        <?php if (isset($meals[$mealType]) && !empty($meals[$mealType])): ?>
+                            <?php foreach ($meals[$mealType] as $meal): ?>
+                                <div class="meal-item">
+                                    <div class="meal-item-info">
+                                        <div class="meal-item-name">
+                                            <?php echo htmlspecialchars($meal['name']); ?>
+                                            <?php if ($meal['is_favorite']): ?>
+                                                <i class="fas fa-star"></i>
                                             <?php endif; ?>
                                         </div>
-                                        <div class="meal-item-actions">
-                                            <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" class="d-inline">
-                                                <input type="hidden" name="toggle_favorite" value="1">
-                                                <input type="hidden" name="meal_id" value="<?php echo $meal['id']; ?>">
-                                                <input type="hidden" name="is_favorite" value="<?php echo $meal['is_favorite']; ?>">
-                                                <button type="submit" class="btn-icon" title="<?php echo $meal['is_favorite'] ? 'Remove from favorites' : 'Add to favorites'; ?>">
-                                                    <i class="<?php echo $meal['is_favorite'] ? 'fas' : 'far'; ?> fa-star"></i>
-                                                </button>
-                                            </form>
-                                            <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" class="d-inline">
-                                                <input type="hidden" name="save_template" value="1">
-                                                <input type="hidden" name="meal_id" value="<?php echo $meal['id']; ?>">
-                                                <button type="submit" class="btn-icon" title="Save as template">
-                                                    <i class="fas fa-save"></i>
-                                                </button>
-                                            </form>
-                                            <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" class="d-inline">
-                                                <input type="hidden" name="delete_meal" value="1">
-                                                <input type="hidden" name="meal_id" value="<?php echo $meal['id']; ?>">
-                                                <button type="submit" class="btn-icon" title="Delete meal" onclick="return confirm('Are you sure you want to delete this meal?')">
-                                                    <i class="fas fa-trash-alt"></i>
-                                                </button>
-                                            </form>
-                                        </div>
-                                    </div>
-                                <?php endforeach; ?>
-                            <?php else: ?>
-                                <div class="meal-empty">
-                                    <i class="fas fa-utensils"></i>
-                                    <p>No meals added for <?php echo $mealType; ?> yet.</p>
-                                    <button class="btn btn-outline btn-sm add-meal-btn" data-meal-type="<?php echo $mealType; ?>">
-                                        <i class="fas fa-plus"></i> Add Meal
-                                    </button>
-                                </div>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-            
-            <!-- Meal Templates Tab -->
-            <div class="tab-content" id="templates-tab">
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Meal Templates</h3>
-                        <button class="btn btn-outline btn-sm" id="createTemplateBtn">
-                            <i class="fas fa-plus"></i> Create Template
-                        </button>
-                    </div>
-                    <div class="card-content">
-                        <div class="templates-grid">
-                            <?php if (!empty($mealTemplates)): ?>
-                                <?php foreach ($mealTemplates as $template): ?>
-                                    <div class="template-card">
-                                        <div class="template-header">
-                                            <div class="template-title"><?php echo htmlspecialchars($template['name']); ?></div>
-                                            <div class="template-type"><?php echo htmlspecialchars($template['meal_type']); ?></div>
-                                        </div>
-                                        <div class="template-macros">
-                                            <div class="template-macro">
-                                                <i class="fas fa-fire"></i> <?php echo $template['calories']; ?> kcal
-                                            </div>
-                                            <div class="template-macro">
-                                                <i class="fas fa-drumstick-bite"></i> <?php echo $template['protein']; ?>g
-                                            </div>
-                                            <div class="template-macro">
-                                                <i class="fas fa-bread-slice"></i> <?php echo $template['carbs']; ?>g
-                                            </div>
-                                            <div class="template-macro">
-                                                <i class="fas fa-cheese"></i> <?php echo $template['fat']; ?>g
-                                            </div>
-                                        </div>
-                                        <div class="template-actions">
-                                            <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post">
-                                                <input type="hidden" name="use_template" value="1">
-                                                <input type="hidden" name="template_id" value="<?php echo $template['id']; ?>">
-                                                <button type="submit" class="btn btn-sm btn-primary">
-                                                    <i class="fas fa-plus"></i> Add to Today
-                                                </button>
-                                            </form>
-                                        </div>
-                                    </div>
-                                <?php endforeach; ?>
-                            <?php else: ?>
-                                <div class="meal-empty">
-                                    <i class="fas fa-clipboard-list"></i>
-                                    <p>No meal templates available yet.</p>
-                                    <button class="btn btn-outline btn-sm" id="createTemplateEmptyBtn">
-                                        <i class="fas fa-plus"></i> Create Template
-                                    </button>
-                                </div>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Favorites Tab -->
-            <div class="tab-content" id="favorites-tab">
-                <div class="card">
-                    <div class="card-header">
-                        <h3>My Favorite Meals</h3>
-                    </div>
-                    <div class="card-content">
-                        <div class="favorites-grid">
-                            <?php if (!empty($favoriteMeals)): ?>
-                                <?php foreach ($favoriteMeals as $meal): ?>
-                                    <div class="template-card">
-                                        <div class="template-header">
-                                            <div class="template-title"><?php echo htmlspecialchars($meal['name']); ?></div>
-                                            <div class="template-type"><?php echo htmlspecialchars($meal['meal_type']); ?></div>
-                                        </div>
-                                        <div class="template-macros">
-                                            <div class="template-macro">
+                                        <div class="meal-item-macros">
+                                            <div class="meal-item-macro">
                                                 <i class="fas fa-fire"></i> <?php echo $meal['calories']; ?> kcal
                                             </div>
-                                            <div class="template-macro">
+                                            <div class="meal-item-macro">
                                                 <i class="fas fa-drumstick-bite"></i> <?php echo $meal['protein']; ?>g
                                             </div>
-                                            <div class="template-macro">
+                                            <div class="meal-item-macro">
                                                 <i class="fas fa-bread-slice"></i> <?php echo $meal['carbs']; ?>g
                                             </div>
-                                            <div class="template-macro">
+                                            <div class="meal-item-macro">
                                                 <i class="fas fa-cheese"></i> <?php echo $meal['fat']; ?>g
                                             </div>
                                         </div>
-                                        <div class="template-actions">
-                                            <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post">
-                                                <input type="hidden" name="save_template" value="1">
-                                                <input type="  name="save_template" value="1">
-                                                <input type="hidden" name="meal_id" value="<?php echo $meal['id']; ?>">
-                                                <button type="submit" class="btn btn-sm btn-outline">
-                                                    <i class="fas fa-save"></i> Save as Template
-                                                </button>
-                                            </form>
-                                        </div>
+                                        <?php if (!empty($meal['notes'])): ?>
+                                            <div class="meal-item-notes"><?php echo htmlspecialchars($meal['notes']); ?></div>
+                                        <?php endif; ?>
                                     </div>
-                                <?php endforeach; ?>
-                            <?php else: ?>
-                                <div class="meal-empty">
-                                    <i class="fas fa-star"></i>
-                                    <p>You haven't added any favorite meals yet.</p>
-                                    <p>Mark meals as favorites to see them here.</p>
+                                    <div class="meal-item-actions">
+                                        <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" class="d-inline">
+                                            <input type="hidden" name="toggle_favorite" value="1">
+                                            <input type="hidden" name="meal_id" value="<?php echo $meal['id']; ?>">
+                                            <input type="hidden" name="is_favorite" value="<?php echo $meal['is_favorite']; ?>">
+                                            <button type="submit" class="btn-icon" title="<?php echo $meal['is_favorite'] ? 'Remove from favorites' : 'Add to favorites'; ?>">
+                                                <i class="<?php echo $meal['is_favorite'] ? 'fas' : 'far'; ?> fa-star"></i>
+                                            </button>
+                                        </form>
+                                        <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" class="d-inline">
+                                            <input type="hidden" name="delete_meal" value="1">
+                                            <input type="hidden" name="meal_id" value="<?php echo $meal['id']; ?>">
+                                            <button type="submit" class="btn-icon" title="Delete meal" onclick="return confirm('Are you sure you want to delete this meal?')">
+                                                <i class="fas fa-trash-alt"></i>
+                                            </button>
+                                        </form>
+                                    </div>
                                 </div>
-                            <?php endif; ?>
-                        </div>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <div class="meal-empty">
+                                <i class="fas fa-utensils"></i>
+                                <p>No meals added for <?php echo $mealType; ?> yet.</p>
+                                <button class="btn add-meal-btn" data-meal-type="<?php echo $mealType; ?>">
+                                    <i class="fas fa-plus"></i> Add Meal
+                                </button>
+                            </div>
+                        <?php endif; ?>
                     </div>
                 </div>
-            </div>
-            
-            <!-- Reports Tab -->
-            <div class="tab-content" id="reports-tab">
-                <div class="card nutrition-history">
-                    <div class="card-header">
-                        <h3>Nutrition History</h3>
-                    </div>
-                    <div class="card-content">
-                        <div class="chart-container">
-                            <canvas id="nutritionHistoryChart"></canvas>
-                        </div>
-                        <div class="chart-legend">
-                            <div class="chart-legend-item">
-                                <div class="chart-legend-color" style="background-color: #ff6b00;"></div>
-                                <span>Calories</span>
-                            </div>
-                            <div class="chart-legend-item">
-                                <div class="chart-legend-color" style="background-color: #28a745;"></div>
-                                <span>Protein</span>
-                            </div>
-                            <div class="chart-legend-item">
-                                <div class="chart-legend-color" style="background-color: #17a2b8;"></div>
-                                <span>Carbs</span>
-                            </div>
-                            <div class="chart-legend-item">
-                                <div class="chart-legend-color" style="background-color: #ffc107;"></div>
-                                <span>Fat</span>
-                            </div>
-                            <div class="chart-legend-item">
-                                <div class="chart-legend-color" style="background-color: #3498db;"></div>
-                                <span>Water</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Nutrition Insights</h3>
-                    </div>
-                    <div class="card-content">
-                        <div id="nutritionInsights">
-                            <p>Loading insights...</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
+            <?php endforeach; ?>
         </div>
     </div>
     
@@ -2488,7 +1720,7 @@ function timeAgo($datetime) {
                 <button type="button" class="modal-close">&times;</button>
             </div>
             <div class="modal-body">
-                <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" id="addMealForm" enctype="multipart/form-data">
+                <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" id="addMealForm">
                     <input type="hidden" name="add_meal" value="1">
                     
                     <div class="form-group">
@@ -2547,12 +1779,6 @@ function timeAgo($datetime) {
                     </div>
                     
                     <div class="form-group">
-                        <label for="meal_image">Meal Image (optional)</label>
-                        <input type="file" id="meal_image" name="meal_image" class="form-control" accept="image/*">
-                        <div class="form-text">Max file size: 5MB. Supported formats: JPEG, PNG, GIF</div>
-                    </div>
-                    
-                    <div class="form-group">
                         <label for="notes">Notes (optional)</label>
                         <textarea id="notes" name="notes" class="form-control" rows="3" placeholder="Add any notes about this meal..."></textarea>
                     </div>
@@ -2565,7 +1791,7 @@ function timeAgo($datetime) {
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline" id="cancelAddMeal">Cancel</button>
-                <button type="submit" form="addMealForm" class="btn btn-primary">Add Meal</button>
+                <button type="submit" form="addMealForm" class="btn">Add Meal</button>
             </div>
         </div>
     </div>
@@ -2583,343 +1809,114 @@ function timeAgo($datetime) {
                     
                     <div class="form-group">
                         <label for="water_amount">Water Amount (ml)</label>
-                        <input type="number" id="water_amount" name="water_amount" class="form-control" min="0" step="50" value="<?php echo $waterIntake; ?>" required>
-                        <div class="form-text">1 glass ≈ 250ml</div>
+                        <input type="number" id="water_amount" name="water_amount" class="form-control" 
+                               min="0" step="50" value="<?php echo $waterIntake; ?>" required>
+                        <small class="form-text text-muted">Target: <?php echo $nutritionData['water_target']; ?> ml per day</small>
                     </div>
                     
-                    <div class="water-controls">
-                        <button type="button" class="btn btn-outline btn-sm" id="decreaseWater">
-                            <i class="fas fa-minus"></i>
-                        </button>
-                        <div class="water-amount" id="waterAmountDisplay"><?php echo $waterIntake; ?> ml</div>
-                        <button type="button" class="btn btn-outline btn-sm" id="increaseWater">
-                            <i class="fas fa-plus"></i>
-                        </button>
+                    <div class="water-quick-buttons" style="margin-top: 1rem;">
+                        <button type="button" class="btn btn-outline btn-sm" onclick="addWater(250)">+250ml</button>
+                        <button type="button" class="btn btn-outline btn-sm" onclick="addWater(500)">+500ml</button>
+                        <button type="button" class="btn btn-outline btn-sm" onclick="addWater(750)">+750ml</button>
+                        <button type="button" class="btn btn-outline btn-sm" onclick="resetWater()">Reset</button>
                     </div>
                 </form>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline" id="cancelUpdateWater">Cancel</button>
-                <button type="submit" form="updateWaterForm" class="btn btn-primary">Update</button>
+                <button type="submit" form="updateWaterForm" class="btn">Update Water</button>
             </div>
         </div>
     </div>
     
-    <!-- Nutrition Settings Modal -->
-    <div class="modal" id="nutritionSettingsModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h4>Nutrition Settings</h4>
-                <button type="button" class="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" id="nutritionSettingsForm">
-                    <input type="hidden" name="update_nutrition_settings" value="1">
-                    
-                    <div class="form-group">
-                        <label for="daily_calories">Daily Calorie Target (kcal)</label>
-                        <input type="number" id="daily_calories" name="daily_calories" class="form-control" min="1000" step="50" value="<?php echo $nutritionData['daily_calories']; ?>" required>
-                    </div>
-                    
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="protein_target">Protein Target (g)</label>
-                            <input type="number" id="protein_target" name="protein_target" class="form-control" min="0" step="5" value="<?php echo $nutritionData['protein_target']; ?>" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="carbs_target">Carbs Target (g)</label>
-                            <input type="number" id="carbs_target" name="carbs_target" class="form-control" min="0" step="5" value="<?php echo $nutritionData['carbs_target']; ?>" required>
-                        </div>
-                    </div>
-                    
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="fat_target">Fat Target (g)</label>
-                            <input type="number" id="fat_target" name="fat_target" class="form-control" min="0" step="5" value="<?php echo $nutritionData['fat_target']; ?>" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="water_target">Water Target (ml)</label>
-                            <input type="number" id="water_target" name="water_target" class="form-control" min="0" step="100" value="<?php echo $nutritionData['water_target']; ?>" required>
-                        </div>
-                    </div>
-                    
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="fiber_target">Fiber Target (g)</label>
-                            <input type="number" id="fiber_target" name="fiber_target" class="form-control" min="0" step="1" value="<?php echo $nutritionData['fiber_target']; ?>" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="sugar_target">Sugar Target (g)</label>
-                            <input type="number" id="sugar_target" name="sugar_target" class="form-control" min="0" step="1" value="<?php echo $nutritionData['sugar_target']; ?>" required>
-                        </div>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline" id="cancelNutritionSettings">Cancel</button>
-                <button type="submit" form="nutritionSettingsForm" class="btn btn-primary">Save Settings</button>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Create Template Modal -->
-    <div class="modal" id="createTemplateModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h4>Create Meal Template</h4>
-                <button type="button" class="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <form action="nutrition.php" method="post" id="createTemplateForm">
-                    <input type="hidden" name="create_template" value="1">
-                    
-                    <div class="form-group">
-                        <label for="template_name">Template Name</label>
-                        <input type="text" id="template_name" name="template_name" class="form-control" placeholder="e.g., Protein Breakfast" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="template_meal_type">Meal Type</label>
-                        <select id="template_meal_type" name="template_meal_type" class="form-control" required>
-                            <?php foreach ($mealTypes as $type): ?>
-                                <option value="<?php echo $type; ?>"><?php echo $type; ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="template_calories">Calories (kcal)</label>
-                            <input type="number" id="template_calories" name="template_calories" class="form-control" min="0" step="1" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="template_protein">Protein (g)</label>
-                            <input type="number" id="template_protein" name="template_protein" class="form-control" min="0" step="0.1" required>
-                        </div>
-                    </div>
-                    
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="template_carbs">Carbs (g)</label>
-                            <input type="number" id="template_carbs" name="template_carbs" class="form-control" min="0" step="0.1" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="template_fat">Fat (g)</label>
-                            <input type="number" id="template_fat" name="template_fat" class="form-control" min="0" step="0.1" required>
-                        </div>
-                    </div>
-                    
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="template_fiber">Fiber (g)</label>
-                            <input type="number" id="template_fiber" name="template_fiber" class="form-control" min="0" step="0.1" value="0">
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="template_sugar">Sugar (g)</label>
-                            <input type="number" id="template_sugar" name="template_sugar" class="form-control" min="0" step="0.1" value="0">
-                        </div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="template_sodium">Sodium (mg)</label>
-                        <input type="number" id="template_sodium" name="template_sodium" class="form-control" min="0" step="1" value="0">
-                    </div>
-                    
-                    <div class="form-check">
-                        <input type="checkbox" id="template_is_public" name="template_is_public" class="form-check-input" checked>
-                        <label for="template_is_public" class="form-check-label">Make template public (visible to other members)</label>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline" id="cancelCreateTemplate">Cancel</button>
-                <button type="submit" form="createTemplateForm" class="btn btn-primary">Create Template</button>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Save Log Modal -->
-    <div class="modal" id="saveLogModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h4>Save Nutrition Log</h4>
-                <button type="button" class="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <form action="nutrition.php?date=<?php echo $currentDate; ?>" method="post" id="saveLogForm">
-                    <input type="hidden" name="save_log" value="1">
-                    
-                    <div class="form-group">
-                        <label for="weight">Weight (optional)</label>
-                        <input type="number" id="weight" name="weight" class="form-control" min="0" step="0.1" placeholder="Enter your current weight">
-                        <div class="form-text">Recording your weight helps track progress over time</div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="log_notes">Notes (optional)</label>
-                        <textarea id="log_notes" name="log_notes" class="form-control" rows="3" placeholder="Add any notes about today's nutrition..."></textarea>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline" id="cancelSaveLog">Cancel</button>
-                <button type="submit" form="saveLogForm" class="btn btn-primary">Save Log</button>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Scripts -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         // Mobile menu toggle
         document.getElementById('mobileMenuToggle').addEventListener('click', function() {
             document.getElementById('sidebar').classList.toggle('show');
         });
         
-        // Tab functionality
-        const tabs = document.querySelectorAll('.tab');
-        const tabContents = document.querySelectorAll('.tab-content');
-        
-        tabs.forEach(tab => {
-            tab.addEventListener('click', function() {
-                const tabId = this.getAttribute('data-tab');
-                
-                // Remove active class from all tabs and contents
-                tabs.forEach(t => t.classList.remove('active'));
-                tabContents.forEach(c => c.classList.remove('active'));
-                
-                // Add active class to current tab and content
-                this.classList.add('active');
-                document.getElementById(tabId + '-tab').classList.add('active');
-                
-                // Initialize charts if on reports tab
-                if (tabId === 'reports') {
-                    initNutritionHistoryChart();
-                    loadNutritionInsights();
-                }
-            });
-        });
-        
         // Modal functionality
         const modals = document.querySelectorAll('.modal');
-        const modalCloseButtons = document.querySelectorAll('.modal-close');
+        const modalTriggers = [
+            { id: 'addMealBtn', modal: 'addMealModal' },
+            { id: 'updateWaterBtn', modal: 'updateWaterModal' },
+            { id: 'updateWaterBtn2', modal: 'updateWaterModal' }
+        ];
         
-        // Open modals
-        document.getElementById('addMealBtn').addEventListener('click', function() {
-            document.getElementById('addMealModal').classList.add('show');
-        });
-        
-        document.getElementById('updateWaterBtn').addEventListener('click', function() {
-            document.getElementById('updateWaterModal').classList.add('show');
-        });
-        
-        document.getElementById('nutritionSettingsBtn').addEventListener('click', function() {
-            document.getElementById('nutritionSettingsModal').classList.add('show');
-        });
-        
-        document.getElementById('createTemplateBtn').addEventListener('click', function() {
-            document.getElementById('createTemplateModal').classList.add('show');
-        });
-        
-        if (document.getElementById('createTemplateEmptyBtn')) {
-            document.getElementById('createTemplateEmptyBtn').addEventListener('click', function() {
-                document.getElementById('createTemplateModal').classList.add('show');
-            });
-        }
-        
-        document.getElementById('saveLogBtn').addEventListener('click', function() {
-            document.getElementById('saveLogModal').classList.add('show');
-        });
-        
-        // Add meal buttons for each meal type
-        const addMealButtons = document.querySelectorAll('.add-meal-btn');
-        addMealButtons.forEach(button => {
+        // Add meal buttons
+        document.querySelectorAll('.add-meal-btn').forEach(button => {
             button.addEventListener('click', function() {
                 const mealType = this.getAttribute('data-meal-type');
-                document.getElementById('meal_type').value = mealType;
+                if (mealType) {
+                    document.getElementById('meal_type').value = mealType;
+                }
                 document.getElementById('addMealModal').classList.add('show');
             });
         });
         
-        // Close modals
-        modalCloseButtons.forEach(button => {
-            button.addEventListener('click', function() {
-                modals.forEach(modal => {
-                    modal.classList.remove('show');
+        // Open modal
+        modalTriggers.forEach(trigger => {
+            const element = document.getElementById(trigger.id);
+            if (element) {
+                element.addEventListener('click', function() {
+                    document.getElementById(trigger.modal).classList.add('show');
                 });
+            }
+        });
+        
+        // Close modal
+        document.querySelectorAll('.modal-close, #cancelAddMeal, #cancelUpdateWater').forEach(button => {
+            button.addEventListener('click', function() {
+                this.closest('.modal').classList.remove('show');
             });
         });
         
-        // Cancel buttons
-        document.getElementById('cancelAddMeal').addEventListener('click', function() {
-            document.getElementById('addMealModal').classList.remove('show');
-        });
-        
-        document.getElementById('cancelUpdateWater').addEventListener('click', function() {
-            document.getElementById('updateWaterModal').classList.remove('show');
-        });
-        
-        document.getElementById('cancelNutritionSettings').addEventListener('click', function() {
-            document.getElementById('nutritionSettingsModal').classList.remove('show');
-        });
-        
-        document.getElementById('cancelCreateTemplate').addEventListener('click', function() {
-            document.getElementById('createTemplateModal').classList.remove('show');
-        });
-        
-        document.getElementById('cancelSaveLog').addEventListener('click', function() {
-            document.getElementById('saveLogModal').classList.remove('show');
-        });
-        
         // Close modal when clicking outside
-        window.addEventListener('click', function(event) {
-            modals.forEach(modal => {
-                if (event.target === modal) {
-                    modal.classList.remove('show');
+        modals.forEach(modal => {
+            modal.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    this.classList.remove('show');
                 }
             });
         });
         
-        // Water intake controls
-        const waterAmount = document.getElementById('water_amount');
-        const waterAmountDisplay = document.getElementById('waterAmountDisplay');
-        const decreaseWaterBtn = document.getElementById('decreaseWater');
-        const increaseWaterBtn = document.getElementById('increaseWater');
+        // Water intake functions
+        function addWater(amount) {
+            const currentAmount = parseInt(document.getElementById('water_amount').value) || 0;
+            document.getElementById('water_amount').value = currentAmount + amount;
+        }
         
-        decreaseWaterBtn.addEventListener('click', function() {
-            let amount = parseInt(waterAmount.value);
-            if (amount >= 250) {
-                amount -= 250;
-                waterAmount.value = amount;
-                waterAmountDisplay.textContent = amount + ' ml';
-            }
-        });
+        function resetWater() {
+            document.getElementById('water_amount').value = 0;
+        }
         
-        increaseWaterBtn.addEventListener('click', function() {
-            let amount = parseInt(waterAmount.value);
-            amount += 250;
-            waterAmount.value = amount;
-            waterAmountDisplay.textContent = amount + ' ml';
-        });
-        
-        // Water glass click
-        const waterGlasses = document.querySelectorAll('.water-glass');
-        waterGlasses.forEach(glass => {
+        // Water glass click functionality
+        document.querySelectorAll('.water-glass').forEach(glass => {
             glass.addEventListener('click', function() {
                 const glassNumber = parseInt(this.getAttribute('data-glass'));
-                const amount = glassNumber * 300;
+                const currentWater = <?php echo $waterIntake; ?>;
+                const newAmount = glassNumber * 300; // 300ml per glass
                 
-                // Update form
-                document.getElementById('water_amount').value = amount;
+                // Update water intake via AJAX or form submission
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = 'nutrition.php?date=<?php echo $currentDate; ?>';
                 
-                // Submit form
-                document.getElementById('updateWaterForm').submit();
+                const updateWaterInput = document.createElement('input');
+                updateWaterInput.type = 'hidden';
+                updateWaterInput.name = 'update_water';
+                updateWaterInput.value = '1';
+                
+                const amountInput = document.createElement('input');
+                amountInput.type = 'hidden';
+                amountInput.name = 'water_amount';
+                amountInput.value = newAmount;
+                
+                form.appendChild(updateWaterInput);
+                form.appendChild(amountInput);
+                document.body.appendChild(form);
+                form.submit();
             });
         });
         
@@ -2931,348 +1928,277 @@ function timeAgo($datetime) {
             });
         }
         
-        // Macro Distribution Chart
-        const macroCtx = document.getElementById('macroChart').getContext('2d');
-        const macroChart = new Chart(macroCtx, {
-            type: 'doughnut',
-            data: {
-                labels: ['Protein', 'Carbs', 'Fat'],
-                datasets: [{
-                    data: [
-                        <?php echo $proteinMacroPercentage; ?>,
-                        <?php echo $carbsMacroPercentage; ?>,
-                        <?php echo $fatMacroPercentage; ?>
-                    ],
-                    backgroundColor: [
-                        '#28a745',
-                        '#17a2b8',
-                        '#ffc107'
-                    ],
-                    borderWidth: 0
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                cutout: '70%',
-                plugins: {
-                    legend: {
-                        display: false
+        // Initialize macro chart with enhanced styling
+        const macroChartEl = document.getElementById('macroChart');
+        if (macroChartEl) {
+            const ctx = macroChartEl.getContext('2d');
+            
+            const proteinCalories = <?php echo $dailyTotals['protein']; ?> * 4;
+            const carbsCalories = <?php echo $dailyTotals['carbs']; ?> * 4;
+            const fatCalories = <?php echo $dailyTotals['fat']; ?> * 9;
+            const totalCalories = proteinCalories + carbsCalories + fatCalories;
+            
+            // Only show chart if there's data
+            if (totalCalories > 0) {
+                new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Protein', 'Carbs', 'Fat'],
+                        datasets: [{
+                            data: [proteinCalories, carbsCalories, fatCalories],
+                            backgroundColor: [
+                                '#27ae60',
+                                '#3498db', 
+                                '#f39c12'
+                            ],
+                            borderColor: [
+                                '#1e8449',
+                                '#2471a3',
+                                '#d68910'
+                            ],
+                            borderWidth: 3,
+                            hoverOffset: 10
+                        }]
                     },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                return context.label + ': ' + context.raw + '%';
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '60%',
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                titleColor: '#fff',
+                                bodyColor: '#fff',
+                                borderColor: '#ff6b35',
+                                borderWidth: 1,
+                                cornerRadius: 8,
+                                displayColors: true,
+                                callbacks: {
+                                    label: function(context) {
+                                        const label = context.label || '';
+                                        const value = context.parsed;
+                                        const percentage = ((value / totalCalories) * 100).toFixed(1);
+                                        const grams = label === 'Protein' ? <?php echo $dailyTotals['protein']; ?> :
+                                                     label === 'Carbs' ? <?php echo $dailyTotals['carbs']; ?> :
+                                                     <?php echo $dailyTotals['fat']; ?>;
+                                        return `${label}: ${grams}g (${percentage}%)`;
+                                    }
+                                }
+                            }
+                        },
+                        animation: {
+                            animateRotate: true,
+                            animateScale: true,
+                            duration: 1000,
+                            easing: 'easeOutQuart'
+                        },
+                        elements: {
+                            arc: {
+                                borderWidth: 3,
+                                hoverBorderWidth: 4
                             }
                         }
                     }
+                });
+                
+                // Add center text
+                const centerText = {
+                    id: 'centerText',
+                    beforeDatasetsDraw(chart, args, options) {
+                        const { ctx, data } = chart;
+                        ctx.save();
+                        
+                        const centerX = chart.getDatasetMeta(0).data[0].x;
+                        const centerY = chart.getDatasetMeta(0).data[0].y;
+                        
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        
+                        // Total calories
+                        ctx.font = 'bold 24px Inter';
+                        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim();
+                        ctx.fillText('<?php echo $dailyTotals['calories']; ?>', centerX, centerY - 10);
+                        
+                        // Label
+                        ctx.font = '14px Inter';
+                        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim();
+                        ctx.fillText('calories', centerX, centerY + 15);
+                        
+                        ctx.restore();
+                    }
+                };
+                
+                Chart.register(centerText);
+            } else {
+                // Show empty state
+                macroChartEl.parentElement.innerHTML = `
+                    <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
+                        <i class="fas fa-chart-pie" style="font-size: 3rem; margin-bottom: 1rem; color: var(--primary);"></i>
+                        <p>Add meals to see your macro distribution</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // Auto-hide success messages
+        setTimeout(function() {
+            const successAlert = document.querySelector('.alert-success');
+            if (successAlert) {
+                successAlert.style.opacity = '0';
+                setTimeout(function() {
+                    successAlert.style.display = 'none';
+                }, 300);
+            }
+        }, 5000);
+        
+        // Form validation
+        document.getElementById('addMealForm').addEventListener('submit', function(e) {
+            const calories = parseInt(document.getElementById('calories').value);
+            const protein = parseFloat(document.getElementById('protein').value);
+            const carbs = parseFloat(document.getElementById('carbs').value);
+            const fat = parseFloat(document.getElementById('fat').value);
+            
+            // Basic validation
+            if (calories <= 0) {
+                alert('Please enter a valid calorie amount');
+                e.preventDefault();
+                return;
+            }
+            
+            if (protein < 0 || carbs < 0 || fat < 0) {
+                alert('Macronutrient values cannot be negative');
+                e.preventDefault();
+                return;
+            }
+            
+            // Calculate calories from macros
+            const calculatedCalories = (protein * 4) + (carbs * 4) + (fat * 9);
+            const difference = Math.abs(calories - calculatedCalories);
+            
+            // Warn if there's a significant difference
+            if (difference > 50) {
+                const confirm = window.confirm(
+                    `The calories you entered (${calories}) don't match the calculated calories from macros (${Math.round(calculatedCalories)}). ` +
+                    'Do you want to continue anyway?'
+                );
+                if (!confirm) {
+                    e.preventDefault();
+                    return;
                 }
             }
         });
         
-        // Nutrition History Chart
-        function initNutritionHistoryChart() {
-            const historyCtx = document.getElementById('nutritionHistoryChart').getContext('2d');
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + M to add meal
+            if ((e.ctrlKey || e.metaKey) && e.key === 'm') {
+                e.preventDefault();
+                document.getElementById('addMealModal').classList.add('show');
+            }
             
-            // Sample data - replace with actual data from PHP
-            const dates = [
-                <?php 
-                    $dates = [];
-                    $calories = [];
-                    $proteins = [];
-                    $carbs = [];
-                    $fats = [];
-                    $waters = [];
-                    
-                    // Get last 7 days
-                    for ($i = 6; $i >= 0; $i--) {
-                        $date = date('Y-m-d', strtotime("-$i days"));
-                        $dates[] = "'" . date('M j', strtotime($date)) . "'";
-                        
-                        // Find matching log
-                        $found = false;
-                        foreach ($nutritionHistory as $log) {
-                            if ($log['log_date'] == $date) {
-                                $calories[] = $log['total_calories'];
-                                $proteins[] = $log['total_protein'];
-                                $carbs[] = $log['total_carbs'];
-                                $fats[] = $log['total_fat'];
-                                $waters[] = $log['total_water'] / 1000; // Convert to liters
-                                $found = true;
-                                break;
-                            }
-                        }
-                        
-                        if (!$found) {
-                            $calories[] = 0;
-                            $proteins[] = 0;
-                            $carbs[] = 0;
-                            $fats[] = 0;
-                            $waters[] = 0;
-                        }
-                    }
-                    
-                    echo implode(', ', $dates);
-                ?>
-            ];
+            // Ctrl/Cmd + W to add water
+            if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+                e.preventDefault();
+                document.getElementById('updateWaterModal').classList.add('show');
+            }
             
-            const caloriesData = [<?php echo implode(', ', $calories); ?>];
-            const proteinData = [<?php echo implode(', ', $proteins); ?>];
-            const carbsData = [<?php echo implode(', ', $carbs); ?>];
-            const fatData = [<?php echo implode(', ', $fats); ?>];
-            const waterData = [<?php echo implode(', ', $waters); ?>];
-            
-            const historyChart = new Chart(historyCtx, {
-                type: 'line',
-                data: {
-                    labels: dates,
-                    datasets: [
-                        {
-                            label: 'Calories',
-                            data: caloriesData,
-                            borderColor: '#ff6b00',
-                            backgroundColor: 'rgba(255, 107, 0, 0.1)',
-                            tension: 0.3,
-                            yAxisID: 'y'
-                        },
-                        {
-                            label: 'Protein (g)',
-                            data: proteinData,
-                            borderColor: '#28a745',
-                            backgroundColor: 'rgba(40, 167, 69, 0.1)',
-                            tension: 0.3,
-                            yAxisID: 'y1'
-                        },
-                        {
-                            label: 'Carbs (g)',
-                            data: carbsData,
-                            borderColor: '#17a2b8',
-                            backgroundColor: 'rgba(23, 162, 184, 0.1)',
-                            tension: 0.3,
-                            yAxisID: 'y1'
-                        },
-                        {
-                            label: 'Fat (g)',
-                            data: fatData,
-                            borderColor: '#ffc107',
-                            backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                            tension: 0.3,
-                            yAxisID: 'y1'
-                        },
-                        {
-                            label: 'Water (L)',
-                            data: waterData,
-                            borderColor: '#3498db',
-                            backgroundColor: 'rgba(52, 152, 219, 0.1)',
-                            tension: 0.3,
-                            yAxisID: 'y1'
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'index',
-                        intersect: false
-                    },
-                    scales: {
-                        y: {
-                            type: 'linear',
-                            display: true,
-                            position: 'left',
-                            title: {
-                                display: true,
-                                text: 'Calories'
-                            }
-                        },
-                        y1: {
-                            type: 'linear',
-                            display: true,
-                            position: 'right',
-                            title: {
-                                display: true,
-                                text: 'Grams / Liters'
-                            },
-                            grid: {
-                                drawOnChartArea: false
-                            }
-                        }
-                    },
-                    plugins: {
-                        legend: {
-                            display: false
-                        }
-                    }
+            // Escape to close modals
+            if (e.key === 'Escape') {
+                modals.forEach(modal => {
+                    modal.classList.remove('show');
+                });
+            }
+        });
+        
+        // Smooth scrolling for meal sections
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
                 }
+            });
+        });
+        
+        // Progressive enhancement for better UX
+        if ('serviceWorker' in navigator) {
+            // Register service worker for offline functionality (if available)
+            navigator.serviceWorker.register('/sw.js').catch(() => {
+                // Silently fail if service worker is not available
             });
         }
         
-        // Load nutrition insights
-        function loadNutritionInsights() {
-            const insightsContainer = document.getElementById('nutritionInsights');
-            
-            // Calculate averages
-            const avgCalories = <?php 
-                $sum = 0;
-                $count = 0;
-                foreach ($nutritionHistory as $log) {
-                    if ($log['total_calories'] > 0) {
-                        $sum += $log['total_calories'];
-                        $count++;
-                    }
+        // Add loading states to forms
+        document.querySelectorAll('form').forEach(form => {
+            form.addEventListener('submit', function() {
+                const submitBtn = this.querySelector('button[type="submit"]');
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
                 }
-                echo $count > 0 ? round($sum / $count) : 0;
-            ?>;
-            
-            const avgProtein = <?php 
-                $sum = 0;
-                $count = 0;
-                foreach ($nutritionHistory as $log) {
-                    if ($log['total_protein'] > 0) {
-                        $sum += $log['total_protein'];
-                        $count++;
-                    }
-                }
-                echo $count > 0 ? round($sum / $count, 1) : 0;
-            ?>;
-            
-            const avgCarbs = <?php 
-                $sum = 0;
-                $count = 0;
-                foreach ($nutritionHistory as $log) {
-                    if ($log['total_carbs'] > 0) {
-                        $sum += $log['total_carbs'];
-                        $count++;
-                    }
-                }
-                echo $count > 0 ? round($sum / $count, 1) : 0;
-            ?>;
-            
-            const avgFat = <?php 
-                $sum = 0;
-                $count = 0;
-                foreach ($nutritionHistory as $log) {
-                    if ($log['total_fat'] > 0) {
-                        $sum += $log['total_fat'];
-                        $count++;
-                    }
-                }
-                echo $count > 0 ? round($sum / $count, 1) : 0;
-            ?>;
-            
-            const avgWater = <?php 
-                $sum = 0;
-                $count = 0;
-                foreach ($nutritionHistory as $log) {
-                    if ($log['total_water'] > 0) {
-                        $sum += $log['total_water'];
-                        $count++;
-                    }
-                }
-                echo $count > 0 ? round($sum / $count) : 0;
-            ?>;
-            
-            // Generate insights
-            let insights = '';
-            
-            if (avgCalories > 0) {
-                insights += `<div class="card" style="margin-bottom: 1rem; padding: 1rem; border-radius: 0.5rem;">
-                    <h4>Weekly Average</h4>
-                    <p>Your average daily intake: <strong>${avgCalories} calories</strong>, ${avgProtein}g protein, ${avgCarbs}g carbs, ${avgFat}g fat</p>
-                    <p>Average water consumption: <strong>${avgWater} ml</strong></p>
-                </div>`;
-            }
-            
-            // Compare with targets
-            const caloriesDiff = <?php echo $dailyTotals['calories']; ?> - <?php echo $nutritionData['daily_calories']; ?>;
-            const proteinDiff = <?php echo $dailyTotals['protein']; ?> - <?php echo $nutritionData['protein_target']; ?>;
-            const carbsDiff = <?php echo $dailyTotals['carbs']; ?> - <?php echo $nutritionData['carbs_target']; ?>;
-            const fatDiff = <?php echo $dailyTotals['fat']; ?> - <?php echo $nutritionData['fat_target']; ?>;
-            const waterDiff = <?php echo $waterIntake; ?> - <?php echo $nutritionData['water_target']; ?>;
-            
-            insights += `<div class="card" style="margin-bottom: 1rem; padding: 1rem; border-radius: 0.5rem;">
-                <h4>Today's Progress</h4>
-                <ul style="list-style-type: none; padding-left: 0;">
-                    <li style="margin-bottom: 0.5rem;">
-                        <i class="fas fa-fire" style="color: var(--primary); margin-right: 0.5rem;"></i>
-                        Calories: <strong>${caloriesDiff > 0 ? caloriesDiff + ' over' : Math.abs(caloriesDiff) + ' under'}</strong> your target
-                    </li>
-                    <li style="margin-bottom: 0.5rem;">
-                        <i class="fas fa-drumstick-bite" style="color: var(--success); margin-right: 0.5rem;"></i>
-                        Protein: <strong>${proteinDiff > 0 ? proteinDiff + 'g over' : Math.abs(proteinDiff) + 'g under'}</strong> your target
-                    </li>
-                    <li style="margin-bottom: 0.5rem;">
-                        <i class="fas fa-bread-slice" style="color: var(--info); margin-right: 0.5rem;"></i>
-                        Carbs: <strong>${carbsDiff > 0 ? carbsDiff + 'g over' : Math.abs(carbsDiff) + 'g under'}</strong> your target
-                    </li>
-                    <li style="margin-bottom: 0.5rem;">
-                        <i class="fas fa-cheese" style="color: var(--warning); margin-right: 0.5rem;"></i>
-                        Fat: <strong>${fatDiff > 0 ? fatDiff + 'g over' : Math.abs(fatDiff) + 'g under'}</strong> your target
-                    </li>
-                    <li>
-                        <i class="fas fa-tint" style="color: #3498db; margin-right: 0.5rem;"></i>
-                        Water: <strong>${waterDiff > 0 ? waterDiff + 'ml over' : Math.abs(waterDiff) + 'ml under'}</strong> your target
-                    </li>
-                </ul>
-            </div>`;
-            
-            // Recommendations
-            insights += `<div class="card" style="padding: 1rem; border-radius: 0.5rem;">
-                <h4>Recommendations</h4>
-                <ul style="list-style-type: none; padding-left: 0;">`;
-                
-            if (<?php echo $proteinPercentage; ?> < 80) {
-                insights += `<li style="margin-bottom: 0.5rem;">
-                    <i class="fas fa-check-circle" style="color: var(--success); margin-right: 0.5rem;"></i>
-                    Try to increase your protein intake to meet your daily target
-                </li>`;
-            }
-            
-            if (<?php echo $waterPercentage; ?> < 80) {
-                insights += `<li style="margin-bottom: 0.5rem;">
-                    <i class="fas fa-check-circle" style="color: var(--success); margin-right: 0.5rem;"></i>
-                    Drink more water to stay hydrated
-                </li>`;
-            }
-            
-            if (<?php echo $carbsPercentage; ?> > 120) {
-                insights += `<li style="margin-bottom: 0.5rem;">
-                    <i class="fas fa-check-circle" style="color: var(--success); margin-right: 0.5rem;"></i>
-                    Consider reducing your carbohydrate intake
-                </li>`;
-            }
-            
-            if (<?php echo $fatPercentage; ?> > 120) {
-                insights += `<li style="margin-bottom: 0.5rem;">
-                    <i class="fas fa-check-circle" style="color: var(--success); margin-right: 0.5rem;"></i>
-                    Try to reduce your fat consumption
-                </li>`;
-            }
-            
-            if (<?php echo $caloriesPercentage; ?> < 80) {
-                insights += `<li>
-                    <i class="fas fa-check-circle" style="color: var(--success); margin-right: 0.5rem;"></i>
-                    You're under your calorie target - make sure you're eating enough
-                </li>`;
-            } else if (<?php echo $caloriesPercentage; ?> > 110) {
-                insights += `<li>
-                    <i class="fas fa-check-circle" style="color: var(--success); margin-right: 0.5rem;"></i>
-                    You're over your calorie target - consider adjusting your intake
-                </li>`;
-            }
-            
-            insights += `</ul>
-            </div>`;
-            
-            insightsContainer.innerHTML = insights;
-        }
+            });
+        });
         
-        // Initialize charts on page load if on reports tab
-        if (document.querySelector('.tab[data-tab="reports"]').classList.contains('active')) {
-            initNutritionHistoryChart();
-            loadNutritionInsights();
-        }
+        // Initialize tooltips for better accessibility
+        document.querySelectorAll('[title]').forEach(element => {
+            element.addEventListener('mouseenter', function() {
+                // Add custom tooltip styling if needed
+                this.style.position = 'relative';
+            });
+        });
+        
+        // Auto-save functionality for forms (optional enhancement)
+        let autoSaveTimeout;
+        document.querySelectorAll('.form-control').forEach(input => {
+            input.addEventListener('input', function() {
+                clearTimeout(autoSaveTimeout);
+                autoSaveTimeout = setTimeout(() => {
+                    // Auto-save draft to localStorage
+                    const formData = new FormData(this.closest('form'));
+                    const data = Object.fromEntries(formData);
+                    localStorage.setItem('nutrition_draft', JSON.stringify(data));
+                }, 1000);
+            });
+        });
+        
+        // Load draft data on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const draft = localStorage.getItem('nutrition_draft');
+            if (draft) {
+                try {
+                    const data = JSON.parse(draft);
+                    // Populate form fields with draft data if modal is opened
+                    document.getElementById('addMealBtn').addEventListener('click', function() {
+                        setTimeout(() => {
+                            Object.keys(data).forEach(key => {
+                                const field = document.getElementById(key);
+                                if (field && field.value === '') {
+                                    field.value = data[key];
+                                }
+                            });
+                        }, 100);
+                    });
+                } catch (e) {
+                    // Invalid draft data, remove it
+                    localStorage.removeItem('nutrition_draft');
+                }
+            }
+        });
+        
+        // Clear draft when form is successfully submitted
+        document.addEventListener('DOMContentLoaded', function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('success') === '1') {
+                localStorage.removeItem('nutrition_draft');
+            }
+        });
     </script>
 </body>
 </html>
