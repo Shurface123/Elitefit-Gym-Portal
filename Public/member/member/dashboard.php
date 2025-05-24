@@ -500,7 +500,7 @@ $totalTrainers = $trainersStats['total_trainers'] ?? 0;
                            <div class="empty-state">
                                <i class="fas fa-calendar-alt"></i>
                                <p>No upcoming appointments</p>
-                               <a href="book-session.php" class="btn">Schedule a Session</a>
+                               <a href="appointments.php" class="btn">Schedule a Session</a>
                            </div>
                        <?php endif; ?>
                    </div>
@@ -546,7 +546,7 @@ $totalTrainers = $trainersStats['total_trainers'] ?? 0;
                            <div class="empty-state">
                                <i class="fas fa-dumbbell"></i>
                                <p>No workout plans assigned yet</p>
-                               <a href="request-workout.php" class="btn">Request a Workout Plan</a>
+                               <a href="workouts.php" class="btn">Request a Workout Plan</a>
                            </div>
                        <?php endif; ?>
                    </div>
@@ -559,21 +559,21 @@ $totalTrainers = $trainersStats['total_trainers'] ?? 0;
                    </div>
                    <div class="card-content">
                        <div class="quick-actions">
-                           <a href="book-session.php" class="quick-action-item">
+                           <a href="appointments.php" class="quick-action-item">
                                <div class="quick-action-icon">
                                    <i class="fas fa-calendar-plus"></i>
                                </div>
                                <div class="quick-action-text">Book a Session</div>
                            </a>
                            
-                           <a href="request-workout.php" class="quick-action-item">
+                           <a href="workouts.php" class="quick-action-item">
                                <div class="quick-action-icon">
                                    <i class="fas fa-dumbbell"></i>
                                </div>
                                <div class="quick-action-text">Request Workout</div>
                            </a>
                            
-                           <a href="log-progress.php" class="quick-action-item">
+                           <a href="progress.php" class="quick-action-item">
                                <div class="quick-action-icon">
                                    <i class="fas fa-weight"></i>
                                </div>

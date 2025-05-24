@@ -338,13 +338,13 @@ unset($_SESSION['register_error']);
                 <div class="role-description">Register as a fitness trainer to guide members</div>
             </div>
             
-            <!-- <div class="role-card" data-role="admin">
+            <div class="role-card" data-role="admin">
                 <div class="role-icon">
                     <i class="fas fa-user-shield"></i>
                 </div>
                 <div class="role-title">ADMIN</div>
                 <div class="role-description">Manage the gym platform and user accounts</div>
-            </div> -->
+            </div>
             
             <div class="role-card" data-role="equipment">
                 <div class="role-icon">

@@ -68,22 +68,33 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             // Log successful login
             logLoginAttempt($email, 1, $_SERVER['REMOTE_ADDR'], $_SERVER['HTTP_USER_AGENT'], $user['role']);
             
-            // Redirect based on role
-            switch ($user['role']) {
-                case 'Member':
+            // DEBUG: Add this temporarily to see what role is being retrieved
+            error_log("User role from database: '" . $user['role'] . "'");
+            
+            // Clean the role string to remove any whitespace or hidden characters
+            $userRole = trim(strtolower($user['role']));
+            
+            // Redirect based on role with more flexible matching
+            switch ($userRole) {
+                case 'member':
                     header("Location: member/dashboard.php");
                     break;
-                case 'Trainer':
+                case 'trainer':
                     header("Location: trainer/dashboard.php");
                     break;
-                case 'Admin':
+                case 'admin':
                     header("Location: admin/dashboard.php");
                     break;
-                case 'EquipmentManager':
+                case 'equipmentmanager':
+                case 'equipment_manager':
+                case 'equipment manager':
                     header("Location: equipment/dashboard.php");
                     break;
                 default:
-                    header("Location: index.php");
+                    // If role doesn't match any case, log it and redirect to default
+                    error_log("Unknown role encountered: '" . $user['role'] . "' for user: " . $email);
+                    $_SESSION['login_error'] = "Invalid user role. Please contact administrator.";
+                    header("Location: login.php");
                     break;
             }
             exit;
@@ -111,4 +122,3 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     exit;
 }
 ?>
-
