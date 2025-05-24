@@ -29,44 +29,44 @@ function array_count($array) {
     return $count;
 }
 
-// Helper function for time ago
-function timeAgo($datetime) {
-    if (empty($datetime)) return 'Unknown';
+// // Helper function for time ago
+// function timeAgo($datetime) {
+//     if (empty($datetime)) return 'Unknown';
     
-    $timestamp = strtotime($datetime);
-    if ($timestamp === false) return 'Unknown';
+//     $timestamp = strtotime($datetime);
+//     if ($timestamp === false) return 'Unknown';
     
-    $difference = time() - $timestamp;
+//     $difference = time() - $timestamp;
     
-    if ($difference < 60) {
-        return "Just now";
-    } elseif ($difference < 3600) {
-        $minutes = round($difference / 60);
-        return $minutes . " minute" . ($minutes > 1 ? "s" : "") . " ago";
-    } elseif ($difference < 86400) {
-        $hours = round($difference / 3600);
-        return $hours . " hour" . ($hours > 1 ? "s" : "") . " ago";
-    } elseif ($difference < 604800) {
-        $days = round($difference / 86400);
-        return $days . " day" . ($days > 1 ? "s" : "") . " ago";
-    } else {
-        return date("M j, Y", $timestamp);
-    }
-}
+//     if ($difference < 60) {
+//         return "Just now";
+//     } elseif ($difference < 3600) {
+//         $minutes = round($difference / 60);
+//         return $minutes . " minute" . ($minutes > 1 ? "s" : "") . " ago";
+//     } elseif ($difference < 86400) {
+//         $hours = round($difference / 3600);
+//         return $hours . " hour" . ($hours > 1 ? "s" : "") . " ago";
+//     } elseif ($difference < 604800) {
+//         $days = round($difference / 86400);
+//         return $days . " day" . ($days > 1 ? "s" : "") . " ago";
+//     } else {
+//         return date("M j, Y", $timestamp);
+//     }
+// }
 
-// Helper function for date formatting
-function formatDate($date) {
-    if (empty($date)) return 'Not specified';
-    $timestamp = strtotime($date);
-    return $timestamp !== false ? date('M j, Y', $timestamp) : 'Not specified';
-}
+// // Helper function for date formatting
+// function formatDate($date) {
+//     if (empty($date)) return 'Not specified';
+//     $timestamp = strtotime($date);
+//     return $timestamp !== false ? date('M j, Y', $timestamp) : 'Not specified';
+// }
 
-// Helper function for time formatting
-function formatTime($datetime) {
-    if (empty($datetime)) return 'Not specified';
-    $timestamp = strtotime($datetime);
-    return $timestamp !== false ? date('g:i A', $timestamp) : 'Not specified';
-}
+// // Helper function for time formatting
+// function formatTime($datetime) {
+//     if (empty($datetime)) return 'Not specified';
+//     $timestamp = strtotime($datetime);
+//     return $timestamp !== false ? date('g:i A', $timestamp) : 'Not specified';
+// }
 
 // Get user data
 $userId = $_SESSION['user_id'];
