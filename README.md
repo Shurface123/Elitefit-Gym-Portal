@@ -1,7 +1,5 @@
 # EliteFitGym - Gym Management System
 
-![EliteFitGym Logo](Public/assets/images/logo.png) <!-- Add your logo if available -->
-
 ## 📋 Project Overview
 
 EliteFitGym is a state-of-the-art gym management system designed to revolutionize fitness center operations. This all-in-one solution provides a seamless experience for gym owners, trainers, and members, offering powerful tools for scheduling, member management, progress tracking, and facility management. Built with modern web technologies, EliteFitGym ensures reliability, security, and scalability for fitness businesses of all sizes.
