@@ -2,9 +2,14 @@
 // Start session
 session_start();
 
-// Include database connection
+// Include database connection and PHPMailer
 require_once __DIR__ . '/db_connect.php';
 require_once __DIR__ . '/functions.php';
+require_once __DIR__ . '/vendor/autoload.php'; // PHPMailer autoload
+
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+use PHPMailer\PHPMailer\Exception;
 
 // Function to sanitize input data
 function sanitizeInput($data) {
@@ -21,14 +26,98 @@ function isValidEmail($email) {
 
 // Function to validate password strength
 function isStrongPassword($password) {
-    // Password must be at least 8 characters long and contain at least one uppercase letter, 
-    // one lowercase letter, one number, and one special character
     $uppercase = preg_match('@[A-Z]@', $password);
     $lowercase = preg_match('@[a-z]@', $password);
     $number = preg_match('@[0-9]@', $password);
     $specialChars = preg_match('@[^\w]@', $password);
     
     return strlen($password) >= 8 && $uppercase && $lowercase && $number && $specialChars;
+}
+
+// Function to generate OTP
+function generateOTP($length = 6) {
+    return str_pad(random_int(0, pow(10, $length) - 1), $length, '0', STR_PAD_LEFT);
+}
+
+// Function to send OTP email
+function sendOTPEmail($email, $name, $otp, $role) {
+    $mail = new PHPMailer(true);
+    
+    try {
+        // Server settings
+        $mail->isSMTP();
+        $mail->Host       = 'smtp.gmail.com'; // Replace with your SMTP server
+        $mail->SMTPAuth   = true;
+        $mail->Username   = 'lovelacejohnkwakubaidoo@gmail.com'; // Replace with your email
+        $mail->Password   = 'qdep zzus harq poqb'; // Replace with your app password
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port       = 587;
+
+        // Recipients
+        $mail->setFrom('lovelacejohnkwakubaidoo@gmail.com', 'EliteFit Gym');
+        $mail->addAddress($email, $name);
+
+        // Content
+        $mail->isHTML(true);
+        $mail->Subject = 'EliteFit Gym - Email Verification Code';
+        
+        $mail->Body = "
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; }
+                .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+                .header { background: linear-gradient(135deg, #FF8C00, #FF6B35); padding: 30px; text-align: center; color: white; }
+                .logo { font-size: 28px; font-weight: bold; margin-bottom: 10px; }
+                .content { padding: 40px 30px; text-align: center; }
+                .otp-code { background-color: #f8f9fa; border: 2px dashed #FF8C00; border-radius: 10px; padding: 20px; margin: 30px 0; font-size: 32px; font-weight: bold; color: #FF8C00; letter-spacing: 5px; }
+                .footer { background-color: #f8f9fa; padding: 20px; text-align: center; color: #666; font-size: 14px; }
+                .btn { display: inline-block; background-color: #FF8C00; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <div class='container'>
+                <div class='header'>
+                    <div class='logo'> ELITEFIT GYM</div>
+                    <p>Welcome to the Elite Fitness Community!</p>
+                </div>
+                <div class='content'>
+                    <h2>Email Verification Required</h2>
+                    <p>Hello <strong>" . htmlspecialchars($name) . "</strong>,</p>
+                    <p>Thank you for registering as a <strong>" . htmlspecialchars($role) . "</strong> with EliteFit Gym!</p>
+                    <p>To complete your registration, please use the verification code below:</p>
+                    
+                    <div class='otp-code'>" . $otp . "</div>
+                    
+                    <p><strong>This code will expire in 15 minutes.</strong></p>
+                    <p>If you didn't request this registration, please ignore this email.</p>
+                    
+                    <div style='margin-top: 30px; padding: 20px; background-color: #fff3cd; border-radius: 5px; border-left: 4px solid #FF8C00;'>
+                        <strong>Security Tips:</strong>
+                        <ul style='text-align: left; margin: 10px 0;'>
+                            <li>Never share your verification code with anyone</li>
+                            <li>EliteFit staff will never ask for your verification code</li>
+                            <li>This code is only valid for 15 minutes</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class='footer'>
+                    <p>© 2024 EliteFit Gym. All rights reserved.</p>
+                    <p>This is an automated message, please do not reply to this email.</p>
+                </div>
+            </div>
+        </body>
+        </html>";
+
+        $mail->AltBody = "Your EliteFit Gym verification code is: $otp. This code will expire in 15 minutes.";
+
+        $mail->send();
+        return true;
+    } catch (Exception $e) {
+        error_log("Email sending failed: {$mail->ErrorInfo}");
+        return false;
+    }
 }
 
 // Function to log registration activity
@@ -94,7 +183,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             // Connect to database
             $conn = connectDB();
             
-            // Check if email already exists
+            // Check if email already exists in users table
             $checkStmt = $conn->prepare("SELECT id FROM users WHERE email = ?");
             $checkStmt->execute([$email]);
             
@@ -105,41 +194,95 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 exit;
             }
             
+            // Check if email already exists in pending verifications
+            $checkPendingStmt = $conn->prepare("SELECT id FROM pending_registrations WHERE email = ? AND expires_at > NOW()");
+            $checkPendingStmt->execute([$email]);
+            
+            if ($checkPendingStmt->rowCount() > 0) {
+                $_SESSION['register_error'] = "A verification email has already been sent to this address. Please check your email or wait for the current verification to expire.";
+                header("Location: register.php");
+                exit;
+            }
+            
+            // Generate OTP
+            $otp = generateOTP(6);
+            $otpExpiry = date('Y-m-d H:i:s', strtotime('+15 minutes'));
+            
             // Hash password
             $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
             
-            // Log registration attempt in analytics
-            $analyticsStmt = $conn->prepare("
-                INSERT INTO registration_analytics (
-                    email, role, registration_date, ip_address, 
-                    user_agent, referrer, completion_step, status
-                ) VALUES (
-                    ?, ?, NOW(), ?, ?, ?, 'Form Submitted', 'In Progress'
-                )
+            // Store pending registration in database
+            $pendingStmt = $conn->prepare("
+                INSERT INTO pending_registrations (
+                    name, email, password_hash, role, experience_level, 
+                    fitness_goals, preferred_routines, otp_code, expires_at, 
+                    created_at, ip_address, user_agent
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    name = VALUES(name),
+                    password_hash = VALUES(password_hash),
+                    role = VALUES(role),
+                    experience_level = VALUES(experience_level),
+                    fitness_goals = VALUES(fitness_goals),
+                    preferred_routines = VALUES(preferred_routines),
+                    otp_code = VALUES(otp_code),
+                    expires_at = VALUES(expires_at),
+                    created_at = NOW(),
+                    verification_attempts = 0
             ");
             
-            $analyticsStmt->execute([
+            $pendingStmt->execute([
+                $name,
                 $email,
+                $hashedPassword,
                 $role,
+                $experienceLevel,
+                $fitnessGoals,
+                $preferredRoutines,
+                $otp,
+                $otpExpiry,
                 $_SERVER['REMOTE_ADDR'],
-                $_SERVER['HTTP_USER_AGENT'],
-                $_SERVER['HTTP_REFERER'] ?? null
+                $_SERVER['HTTP_USER_AGENT']
             ]);
             
-            // Store user data in session for verification
-            $_SESSION['temp_user_data'] = [
-                'name' => $name,
-                'email' => $email,
-                'hashed_password' => $hashedPassword,
-                'role' => $role,
-                'experience_level' => $experienceLevel,
-                'fitness_goals' => $fitnessGoals,
-                'preferred_routines' => $preferredRoutines
-            ];
-            
-            // Redirect to verification page
-            header("Location: verification.php");
-            exit;
+            // Send OTP email
+            if (sendOTPEmail($email, $name, $otp, $role)) {
+                // Log registration attempt in analytics
+                $analyticsStmt = $conn->prepare("
+                    INSERT INTO registration_analytics (
+                        email, role, registration_date, ip_address, 
+                        user_agent, referrer, completion_step, status
+                    ) VALUES (
+                        ?, ?, NOW(), ?, ?, ?, 'OTP Sent', 'Pending Verification'
+                    )
+                ");
+                
+                $analyticsStmt->execute([
+                    $email,
+                    $role,
+                    $_SERVER['REMOTE_ADDR'],
+                    $_SERVER['HTTP_USER_AGENT'],
+                    $_SERVER['HTTP_REFERER'] ?? null
+                ]);
+                
+                // Store email in session for verification page
+                $_SESSION['verification_email'] = $email;
+                $_SESSION['verification_name'] = $name;
+                $_SESSION['verification_role'] = $role;
+                
+                // Log successful OTP sending
+                logRegistration($email, 1, $role, "OTP sent successfully");
+                
+                // Redirect to verification page
+                header("Location: verify_otp.php");
+                exit;
+            } else {
+                // Email sending failed
+                $_SESSION['register_error'] = "Failed to send verification email. Please try again.";
+                logRegistration($email, 0, $role, "Email sending failed");
+                header("Location: register.php");
+                exit;
+            }
             
         } catch (PDOException $e) {
             // Log error
@@ -157,7 +300,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $_SESSION['register_error'] = implode("<br>", $errors);
         
         // Log failed registration
-        logRegistration($email, 0, $role, implode(", ", $errors));
+        logRegistration($email ?? 'unknown', 0, $role ?? 'unknown', implode(", ", $errors));
         
         // Redirect back to registration page
         header("Location: register.php");

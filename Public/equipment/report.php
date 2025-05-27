@@ -6,639 +6,626 @@ session_start();
 // Include authentication middleware
 require_once __DIR__ . '/../auth_middleware.php';
 
-// Enable error reporting for debugging
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+// Require EquipmentManager role to access this page
+requireRole('EquipmentManager');
 
-// Log the current directory and included files for debugging
-error_log("Current directory: " . __DIR__);
+// Include theme helper
+require_once 'dashboard-theme-helper.php';
 
-// Define the required functions directly in this file to avoid dependency issues
-// function connectDB() {
-//     try {
-//         $host = 'localhost';
-//         $dbname = 'elitefitgym';
-//         $username = 'root';
-//         $password = '';
-        
-//         $conn = new PDO("mysql:host=$host;dbname=$dbname", $username, $password);
-//         $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        
-//         return $conn;
-//     } catch (Exception $e) {
-//         error_log("Database connection error: " . $e->getMessage());
-//         throw $e;
-//     }
-// }
-
-function ensureDatabaseTablesExist($conn) {
-    try {
-        // Check if dashboard_settings table exists
-        $tableExists = false;
-        $stmt = $conn->query("SHOW TABLES LIKE 'dashboard_settings'");
-        $tableExists = ($stmt && $stmt->rowCount() > 0);
-        
-        // Create dashboard_settings table if it doesn't exist
-        if (!$tableExists) {
-            $createTableSQL = "
-                CREATE TABLE dashboard_settings (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id INT NOT NULL,
-                    theme_preference VARCHAR(20) DEFAULT 'dark',
-                    sidebar_collapsed TINYINT(1) DEFAULT 0,
-                    items_per_page INT DEFAULT 10,
-                    default_view VARCHAR(20) DEFAULT 'list',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    UNIQUE KEY (user_id)
-                )
-            ";
-            $conn->exec($createTableSQL);
-        }
-    } catch (PDOException $e) {
-        error_log("Error in ensureDatabaseTablesExist: " . $e->getMessage());
-        // Continue execution even if there's an error
-    }
-}
-
-function getUserThemePreference($conn, $userId) {
-    try {
-        // Ensure tables exist
-        ensureDatabaseTablesExist($conn);
-        
-        // Get user theme preference
-        $stmt = $conn->prepare("SELECT theme_preference FROM dashboard_settings WHERE user_id = ?");
-        $stmt->execute([$userId]);
-        
-        if ($stmt && $stmt->rowCount() > 0) {
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            return $row['theme_preference'];
-        } else {
-            // Create default settings for user
-            $stmt = $conn->prepare("INSERT INTO dashboard_settings (user_id, theme_preference) VALUES (?, 'dark') ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)");
-            $stmt->execute([$userId]);
-            return 'dark';
-        }
-    } catch (Exception $e) {
-        error_log("Error in getUserThemePreference: " . $e->getMessage());
-        return 'dark'; // Default to dark theme if there's an error
-    }
-}
-
-function generateInlineCSS($theme = 'dark') {
-    $variables = [
-        'dark' => [
-            '--primary-bg' => '#121212',
-            '--secondary-bg' => '#1e1e1e',
-            '--card-bg' => '#252525',
-            '--text-color' => '#ffffff',
-            '--text-muted' => '#b0b0b0',
-            '--accent-color' => '#ff8c00',
-            '--accent-hover' => '#ff7000',
-            '--border-color' => '#333333',
-            '--success-color' => '#4caf50',
-            '--warning-color' => '#ff9800',
-            '--danger-color' => '#f44336',
-            '--info-color' => '#2196f3',
-        ],
-        'light' => [
-            '--primary-bg' => '#f8f9fa',
-            '--secondary-bg' => '#ffffff',
-            '--card-bg' => '#ffffff',
-            '--text-color' => '#212529',
-            '--text-muted' => '#6c757d',
-            '--accent-color' => '#ff8c00',
-            '--accent-hover' => '#ff7000',
-            '--border-color' => '#dee2e6',
-            '--success-color' => '#28a745',
-            '--warning-color' => '#ffc107',
-            '--danger-color' => '#dc3545',
-            '--info-color' => '#17a2b8',
-        ]
-    ];
-    
-    $themeVars = $variables[$theme] ?? $variables['dark'];
-    $css = ":root {\n";
-    
-    foreach ($themeVars as $name => $value) {
-        $css .= "    $name: $value;\n";
-    }
-    
-    $css .= "}";
-    return $css;
-}
-
-function doesEquipmentTableExist($conn) {
-    try {
-        $stmt = $conn->query("SHOW TABLES LIKE 'equipment'");
-        return ($stmt && $stmt->rowCount() > 0);
-    } catch (PDOException $e) {
-        error_log("Error checking equipment table: " . $e->getMessage());
-        return false;
-    }
-}
-
-function doesMaintenanceTableExist($conn) {
-    try {
-        $stmt = $conn->query("SHOW TABLES LIKE 'maintenance'");
-        return ($stmt && $stmt->rowCount() > 0);
-    } catch (PDOException $e) {
-        error_log("Error checking maintenance table: " . $e->getMessage());
-        return false;
-    }
-}
-
-// Try to include other required files, but don't fail if they're not found
-try {
-    if (file_exists('../../config/database.php')) {
-        require_once '../../config/database.php';
-    }
-    
-    if (file_exists('../auth_middleware.php')) {
-        require_once '../auth_middleware.php';
-    }
-} catch (Exception $e) {
-    error_log("Error including optional files: " . $e->getMessage());
-    // Continue execution even if these files aren't found
-}
-
-// Check if user is logged in and has appropriate permissions
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../login.php');
-    exit();
-}
-
-// Check role with more flexibility (case-insensitive comparison)
-$userRole = strtolower($_SESSION['role'] ?? '');
-$allowedRoles = ['equipment_manager', 'equipmentmanager', 'equipment manager', 'admin', 'administrator'];
-if (!in_array($userRole, $allowedRoles)) {
-    // Log the issue for debugging
-    error_log("Access denied to report.php. User role: " . ($_SESSION['role'] ?? 'undefined'));
-    header('Location: dashboard.php');
-    exit();
-}
-
-// Connect to database with error handling
-try {
-    // Try to use the Database class if it exists
-    if (class_exists('Database')) {
-        $db = new Database();
-        $conn = $db->getConnection();
-    } else {
-        // Fall back to our own connection function
-        $conn = connectDB();
-    }
-    
-    if (!$conn) {
-        throw new Exception("Database connection failed");
-    }
-} catch (Exception $e) {
-    error_log("Database connection error in report.php: " . $e->getMessage());
-    echo "<div style='color:red; padding:20px; background:#ffeeee; border:1px solid #ff0000; margin:20px;'>";
-    echo "<h3>Database Connection Error</h3>";
-    echo "<p>Could not connect to the database. Please check your configuration.</p>";
-    echo "<p><a href='dashboard.php' class='btn btn-primary'>Return to Dashboard</a></p>";
-    echo "</div>";
-    exit();
-}
-
-// Get user theme preference
+// Get user data
 $userId = $_SESSION['user_id'];
-try {
-    $theme = getUserThemePreference($conn, $userId);
-} catch (Exception $e) {
-    error_log("Error getting theme preference: " . $e->getMessage());
-    $theme = 'dark'; // Default to dark theme if there's an error
-}
-$userName = $_SESSION['username'] ?? 'Equipment Manager';
+$userName = $_SESSION['name'];
 
-// Get report type and parameters
-$reportType = isset($_GET['type']) ? $_GET['type'] : 'inventory';
+// Get theme preference (default to dark)
+$theme = getThemePreference($userId) ?: 'dark';
+$themeClasses = getThemeClasses($theme);
+
+// Connect to database
+$conn = connectDB();
+
+// Handle form submissions
+$message = '';
+$messageType = '';
+
+// Helper function to safely format numbers
+function safeNumberFormat($value, $decimals = 0) {
+    return number_format($value ?? 0, $decimals);
+}
+
+// Helper function to safely escape HTML
+function safeHtmlSpecialChars($value) {
+    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
+}
+
+// Create necessary tables if they don't exist
+$createEquipmentTableStmt = $conn->prepare("
+CREATE TABLE IF NOT EXISTS equipment (
+id INT NOT NULL AUTO_INCREMENT,
+name VARCHAR(255) NOT NULL,
+type VARCHAR(100) NOT NULL,
+brand VARCHAR(100) DEFAULT NULL,
+model VARCHAR(100) DEFAULT NULL,
+serial_number VARCHAR(100) DEFAULT NULL,
+status ENUM('Available', 'In Use', 'Maintenance', 'Out of Order', 'Retired') DEFAULT 'Available',
+location VARCHAR(255) DEFAULT NULL,
+purchase_date DATE DEFAULT NULL,
+warranty_expiry DATE DEFAULT NULL,
+cost DECIMAL(10,2) DEFAULT 0.00,
+manufacturer VARCHAR(255) DEFAULT NULL,
+condition_rating INT DEFAULT 5,
+usage_hours INT DEFAULT 0,
+max_weight DECIMAL(8,2) DEFAULT NULL,
+dimensions VARCHAR(100) DEFAULT NULL,
+power_requirements VARCHAR(100) DEFAULT NULL,
+safety_features TEXT,
+maintenance_schedule VARCHAR(100) DEFAULT 'Monthly',
+last_maintenance_date DATE DEFAULT NULL,
+next_maintenance_date DATE DEFAULT NULL,
+qr_code VARCHAR(255) DEFAULT NULL,
+image_url VARCHAR(500) DEFAULT NULL,
+manual_url VARCHAR(500) DEFAULT NULL,
+notes TEXT,
+is_active BOOLEAN DEFAULT TRUE,
+created_by INT DEFAULT NULL,
+updated_by INT DEFAULT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+PRIMARY KEY (id),
+INDEX idx_type (type),
+INDEX idx_status (status),
+INDEX idx_location (location),
+INDEX idx_serial (serial_number),
+INDEX idx_active (is_active),
+FULLTEXT(name, type, brand, model, manufacturer, notes)
+)
+");
+$createEquipmentTableStmt->execute();
+
+// Create maintenance table if it doesn't exist
+$createMaintenanceTableStmt = $conn->prepare("
+CREATE TABLE IF NOT EXISTS maintenance (
+id INT NOT NULL AUTO_INCREMENT,
+equipment_id INT NOT NULL,
+maintenance_type ENUM('Preventive', 'Corrective', 'Emergency', 'Inspection') DEFAULT 'Preventive',
+description TEXT NOT NULL,
+scheduled_date DATE NOT NULL,
+completed_date DATE DEFAULT NULL,
+technician_name VARCHAR(255) DEFAULT NULL,
+technician_id INT DEFAULT NULL,
+status ENUM('Scheduled', 'In Progress', 'Completed', 'Cancelled', 'Overdue') DEFAULT 'Scheduled',
+priority ENUM('Low', 'Medium', 'High', 'Critical') DEFAULT 'Medium',
+estimated_duration INT DEFAULT NULL,
+actual_duration INT DEFAULT NULL,
+cost DECIMAL(10,2) DEFAULT 0.00,
+parts_used TEXT,
+notes TEXT,
+before_images TEXT,
+after_images TEXT,
+next_maintenance_date DATE DEFAULT NULL,
+warranty_affected BOOLEAN DEFAULT FALSE,
+downtime_hours DECIMAL(5,2) DEFAULT 0.00,
+created_by INT DEFAULT NULL,
+updated_by INT DEFAULT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+PRIMARY KEY (id),
+FOREIGN KEY (equipment_id) REFERENCES equipment(id) ON DELETE CASCADE,
+INDEX idx_equipment (equipment_id),
+INDEX idx_status (status),
+INDEX idx_scheduled_date (scheduled_date),
+INDEX idx_technician (technician_id),
+INDEX idx_type (maintenance_type),
+INDEX idx_priority (priority)
+)
+");
+$createMaintenanceTableStmt->execute();
+
+// Create equipment usage table if it doesn't exist
+$createUsageTableStmt = $conn->prepare("
+CREATE TABLE IF NOT EXISTS equipment_usage (
+id INT NOT NULL AUTO_INCREMENT,
+equipment_id INT NOT NULL,
+user_id INT DEFAULT NULL,
+member_id INT DEFAULT NULL,
+recorded_by INT DEFAULT NULL,
+start_time DATETIME NOT NULL,
+end_time DATETIME DEFAULT NULL,
+usage_date DATE NOT NULL,
+duration_minutes INT DEFAULT NULL,
+usage_type ENUM('Training', 'Maintenance', 'Testing', 'Demo') DEFAULT 'Training',
+intensity_level ENUM('Low', 'Medium', 'High') DEFAULT 'Medium',
+calories_burned INT DEFAULT NULL,
+distance DECIMAL(8,2) DEFAULT NULL,
+notes TEXT,
+session_rating INT DEFAULT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+PRIMARY KEY (id),
+FOREIGN KEY (equipment_id) REFERENCES equipment(id) ON DELETE CASCADE,
+INDEX idx_equipment (equipment_id),
+INDEX idx_user (user_id),
+INDEX idx_member (member_id),
+INDEX idx_start_time (start_time),
+INDEX idx_usage_date (usage_date),
+INDEX idx_usage_type (usage_type)
+)
+");
+$createUsageTableStmt->execute();
+
+// Get report parameters
+$reportType = isset($_GET['type']) ? $_GET['type'] : 'overview';
 $startDate = isset($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-d', strtotime('-30 days'));
 $endDate = isset($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
 $equipmentType = isset($_GET['equipment_type']) ? $_GET['equipment_type'] : '';
 $status = isset($_GET['status']) ? $_GET['status'] : '';
+$location = isset($_GET['location']) ? $_GET['location'] : '';
 $exportFormat = isset($_GET['export']) ? $_GET['export'] : '';
 
-// Handle export request
+// Handle export requests
 if (!empty($exportFormat)) {
-    if (file_exists('export-handler.php')) {
-        require_once 'export-handler.php';
-        exportReport($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $exportFormat);
-        exit();
-    } else {
-        echo "<div style='color:red; padding:20px;'>Export handler file not found</div>";
+    switch ($exportFormat) {
+        case 'excel':
+            exportToExcel($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+            break;
+        case 'pdf':
+            exportToPDF($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+            break;
+        case 'csv':
+            exportToCSV($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+            break;
     }
+    exit();
 }
-
-// Check if tables exist
-$equipmentTableExists = doesEquipmentTableExist($conn);
-$maintenanceTableExists = doesMaintenanceTableExist($conn);
 
 // Get equipment types for filter
 $equipmentTypes = [];
-if ($equipmentTableExists) {
-    try {
-        $typeQuery = "SELECT DISTINCT type FROM equipment ORDER BY type";
-        $stmt = $conn->query($typeQuery);
-        if ($stmt) {
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $equipmentTypes[] = $row['type'];
-            }
-        }
-    } catch (PDOException $e) {
-        error_log("Error getting equipment types: " . $e->getMessage());
-    }
-}
+$typeStmt = $conn->prepare("SELECT DISTINCT type FROM equipment WHERE is_active = TRUE ORDER BY type");
+$typeStmt->execute();
+$equipmentTypes = $typeStmt->fetchAll(PDO::FETCH_COLUMN);
 
-// Get maintenance statuses for filter
-$maintenanceStatuses = ['pending', 'in_progress', 'completed', 'cancelled'];
+// Get locations for filter
+$locations = [];
+$locationStmt = $conn->prepare("SELECT DISTINCT location FROM equipment WHERE is_active = TRUE AND location IS NOT NULL AND location != '' ORDER BY location");
+$locationStmt->execute();
+$locations = $locationStmt->fetchAll(PDO::FETCH_COLUMN);
 
-// Get equipment statuses for filter
-$equipmentStatuses = ['available', 'in_use', 'maintenance', 'retired'];
+// Get equipment statistics
+$statsStmt = $conn->prepare("
+SELECT 
+    COUNT(*) as total,
+    SUM(CASE WHEN status = 'Available' THEN 1 ELSE 0 END) as available,
+    SUM(CASE WHEN status = 'In Use' THEN 1 ELSE 0 END) as in_use,
+    SUM(CASE WHEN status = 'Maintenance' THEN 1 ELSE 0 END) as maintenance,
+    SUM(CASE WHEN status = 'Out of Order' THEN 1 ELSE 0 END) as out_of_order,
+    SUM(CASE WHEN status = 'Retired' THEN 1 ELSE 0 END) as retired,
+    COALESCE(SUM(cost), 0) as total_value,
+    COALESCE(AVG(condition_rating), 0) as avg_condition,
+    COALESCE(SUM(usage_hours), 0) as total_usage_hours
+FROM equipment WHERE is_active = TRUE
+");
+$statsStmt->execute();
+$stats = $statsStmt->fetch(PDO::FETCH_ASSOC);
+
+// Get maintenance statistics
+$maintenanceStatsStmt = $conn->prepare("
+SELECT 
+    COUNT(*) as total_maintenance,
+    SUM(CASE WHEN status = 'Scheduled' THEN 1 ELSE 0 END) as scheduled,
+    SUM(CASE WHEN status = 'In Progress' THEN 1 ELSE 0 END) as in_progress,
+    SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) as completed,
+    SUM(CASE WHEN status = 'Overdue' THEN 1 ELSE 0 END) as overdue,
+    COALESCE(SUM(cost), 0) as total_maintenance_cost,
+    COALESCE(AVG(actual_duration), 0) as avg_duration,
+    COALESCE(SUM(downtime_hours), 0) as total_downtime
+FROM maintenance 
+WHERE scheduled_date BETWEEN :start_date AND :end_date
+");
+$maintenanceStatsStmt->bindParam(':start_date', $startDate);
+$maintenanceStatsStmt->bindParam(':end_date', $endDate);
+$maintenanceStatsStmt->execute();
+$maintenanceStats = $maintenanceStatsStmt->fetch(PDO::FETCH_ASSOC);
+
+// Get usage statistics
+$usageStatsStmt = $conn->prepare("
+SELECT 
+    COUNT(*) as total_sessions,
+    COALESCE(SUM(duration_minutes), 0) as total_duration,
+    COALESCE(AVG(duration_minutes), 0) as avg_duration,
+    COALESCE(SUM(calories_burned), 0) as total_calories,
+    COALESCE(AVG(session_rating), 0) as avg_rating,
+    COUNT(DISTINCT equipment_id) as equipment_used,
+    COUNT(DISTINCT member_id) as unique_users
+FROM equipment_usage 
+WHERE usage_date BETWEEN :start_date AND :end_date
+");
+$usageStatsStmt->bindParam(':start_date', $startDate);
+$usageStatsStmt->bindParam(':end_date', $endDate);
+$usageStatsStmt->execute();
+$usageStats = $usageStatsStmt->fetch(PDO::FETCH_ASSOC);
 
 // Get report data based on type
-function getReportDataForDisplay($conn, $reportType, $startDate, $endDate, $equipmentType, $status) {
+function getReportData($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location) {
     $data = [];
     
-    try {
-        switch ($reportType) {
-            case 'inventory':
-                $query = "SELECT e.*, 
-                         (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.status = 'pending') as pending_maintenance,
-                         (SELECT MAX(maintenance_date) FROM maintenance m WHERE m.equipment_id = e.id AND m.status = 'completed') as last_maintenance
-                         FROM equipment e WHERE 1=1";
-                
-                if (!empty($equipmentType)) {
-                    $query .= " AND e.type = :equipmentType";
-                }
-                
-                if (!empty($status)) {
-                    $query .= " AND e.status = :status";
-                }
-                
-                $query .= " ORDER BY e.name";
-                
-                $stmt = $conn->prepare($query);
-                
-                if (!empty($equipmentType)) {
-                    $stmt->bindParam(':equipmentType', $equipmentType);
-                }
-                
-                if (!empty($status)) {
-                    $stmt->bindParam(':status', $status);
-                }
-                
-                $stmt->execute();
-                break;
-                
-            case 'maintenance':
-                $query = "SELECT m.*, e.name as equipment_name, e.type as equipment_type 
-                         FROM maintenance m
-                         JOIN equipment e ON m.equipment_id = e.id
-                         WHERE m.maintenance_date BETWEEN :startDate AND :endDate";
-                
-                if (!empty($equipmentType)) {
-                    $query .= " AND e.type = :equipmentType";
-                }
-                
-                if (!empty($status)) {
-                    $query .= " AND m.status = :status";
-                }
-                
-                $query .= " ORDER BY m.maintenance_date DESC";
-                
-                $stmt = $conn->prepare($query);
-                $stmt->bindParam(':startDate', $startDate);
-                $stmt->bindParam(':endDate', $endDate);
-                
-                if (!empty($equipmentType)) {
-                    $stmt->bindParam(':equipmentType', $equipmentType);
-                }
-                
-                if (!empty($status)) {
-                    $stmt->bindParam(':status', $status);
-                }
-                
-                $stmt->execute();
-                break;
-                
-            case 'usage':
-                $query = "SELECT eu.*, e.name as equipment_name, e.type as equipment_type, 
-                         u.username as user_name
-                         FROM equipment_usage eu
-                         JOIN equipment e ON eu.equipment_id = e.id
-                         LEFT JOIN users u ON eu.user_id = u.id
-                         WHERE eu.usage_date BETWEEN :startDate AND :endDate";
-                
-                if (!empty($equipmentType)) {
-                    $query .= " AND e.type = :equipmentType";
-                }
-                
-                $query .= " ORDER BY eu.usage_date DESC";
-                
-                $stmt = $conn->prepare($query);
-                $stmt->bindParam(':startDate', $startDate);
-                $stmt->bindParam(':endDate', $endDate);
-                
-                if (!empty($equipmentType)) {
-                    $stmt->bindParam(':equipmentType', $equipmentType);
-                }
-                
-                $stmt->execute();
-                break;
-                
-            case 'cost':
-                $query = "SELECT e.id, e.name, e.type, e.purchase_date, e.purchase_cost,
-                         (SELECT SUM(cost) FROM maintenance m WHERE m.equipment_id = e.id AND m.maintenance_date BETWEEN :startDate AND :endDate) as maintenance_cost,
-                         (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.maintenance_date BETWEEN :startDate AND :endDate) as maintenance_count
-                         FROM equipment e WHERE 1=1";
-                
-                if (!empty($equipmentType)) {
-                    $query .= " AND e.type = :equipmentType";
-                }
-                
-                if (!empty($status)) {
-                    $query .= " AND e.status = :status";
-                }
-                
-                $query .= " ORDER BY e.name";
-                
-                $stmt = $conn->prepare($query);
-                $stmt->bindParam(':startDate', $startDate);
-                $stmt->bindParam(':endDate', $endDate);
-                
-                if (!empty($equipmentType)) {
-                    $stmt->bindParam(':equipmentType', $equipmentType);
-                }
-                
-                if (!empty($status)) {
-                    $stmt->bindParam(':status', $status);
-                }
-                
-                $stmt->execute();
-                break;
-                
-            case 'performance':
-                $query = "SELECT e.id, e.name, e.type, 
-                         (SELECT COUNT(*) FROM equipment_usage eu WHERE eu.equipment_id = e.id AND eu.usage_date BETWEEN :startDate AND :endDate) as usage_count,
-                         (SELECT SUM(duration) FROM equipment_usage eu WHERE eu.equipment_id = e.id AND eu.usage_date BETWEEN :startDate AND :endDate) as total_duration,
-                         (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.maintenance_date BETWEEN :startDate AND :endDate) as maintenance_count
-                         FROM equipment e WHERE 1=1";
-                
-                if (!empty($equipmentType)) {
-                    $query .= " AND e.type = :equipmentType";
-                }
-                
-                if (!empty($status)) {
-                    $query .= " AND e.status = :status";
-                }
-                
-                $query .= " ORDER BY usage_count DESC";
-                
-                $stmt = $conn->prepare($query);
-                $stmt->bindParam(':startDate', $startDate);
-                $stmt->bindParam(':endDate', $endDate);
-                
-                if (!empty($equipmentType)) {
-                    $stmt->bindParam(':equipmentType', $equipmentType);
-                }
-                
-                if (!empty($status)) {
-                    $stmt->bindParam(':status', $status);
-                }
-                
-                $stmt->execute();
-                break;
-        }
-        
-        if (isset($stmt) && $stmt) {
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $data[] = $row;
-            }
-        }
-    } catch (PDOException $e) {
-        error_log("Error in getReportDataForDisplay: " . $e->getMessage());
+    switch ($reportType) {
+        case 'overview':
+            // Get overview data combining multiple metrics
+            $query = "SELECT 
+                e.id, e.name, e.type, e.status, e.location, 
+                COALESCE(e.cost, 0) as cost, 
+                COALESCE(e.condition_rating, 0) as condition_rating, 
+                COALESCE(e.usage_hours, 0) as usage_hours,
+                (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.scheduled_date BETWEEN :start_date AND :end_date) as maintenance_count,
+                (SELECT COALESCE(SUM(m.cost), 0) FROM maintenance m WHERE m.equipment_id = e.id AND m.scheduled_date BETWEEN :start_date AND :end_date) as maintenance_cost,
+                (SELECT COUNT(*) FROM equipment_usage u WHERE u.equipment_id = e.id AND u.usage_date BETWEEN :start_date AND :end_date) as usage_sessions,
+                (SELECT COALESCE(SUM(u.duration_minutes), 0) FROM equipment_usage u WHERE u.equipment_id = e.id AND u.usage_date BETWEEN :start_date AND :end_date) as total_usage_time
+                FROM equipment e WHERE e.is_active = TRUE";
+            break;
+            
+        case 'inventory':
+            $query = "SELECT 
+                e.*, 
+                (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.status = 'Scheduled') as pending_maintenance,
+                (SELECT MAX(m.completed_date) FROM maintenance m WHERE m.equipment_id = e.id AND m.status = 'Completed') as last_maintenance
+                FROM equipment e WHERE e.is_active = TRUE";
+            break;
+            
+        case 'maintenance':
+            $query = "SELECT 
+                m.*, e.name as equipment_name, e.type as equipment_type, e.location
+                FROM maintenance m
+                JOIN equipment e ON m.equipment_id = e.id
+                WHERE m.scheduled_date BETWEEN :start_date AND :end_date";
+            break;
+            
+        case 'usage':
+            $query = "SELECT 
+                eu.*, e.name as equipment_name, e.type as equipment_type, e.location,
+                COALESCE(us.name, 'Unknown User') as user_name
+                FROM equipment_usage eu
+                JOIN equipment e ON eu.equipment_id = e.id
+                LEFT JOIN users us ON eu.recorded_by = us.id
+                WHERE eu.usage_date BETWEEN :start_date AND :end_date";
+            break;
+            
+        case 'cost':
+            $query = "SELECT 
+                e.id, e.name, e.type, 
+                COALESCE(e.cost, 0) as purchase_cost, 
+                e.purchase_date,
+                (SELECT COALESCE(SUM(m.cost), 0) FROM maintenance m WHERE m.equipment_id = e.id AND m.scheduled_date BETWEEN :start_date AND :end_date) as maintenance_cost,
+                (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.scheduled_date BETWEEN :start_date AND :end_date) as maintenance_count
+                FROM equipment e WHERE e.is_active = TRUE";
+            break;
+            
+        case 'performance':
+            $query = "SELECT 
+                e.id, e.name, e.type, 
+                COALESCE(e.condition_rating, 0) as condition_rating, 
+                COALESCE(e.usage_hours, 0) as usage_hours,
+                (SELECT COUNT(*) FROM equipment_usage u WHERE u.equipment_id = e.id AND u.usage_date BETWEEN :start_date AND :end_date) as usage_count,
+                (SELECT COALESCE(SUM(u.duration_minutes), 0) FROM equipment_usage u WHERE u.equipment_id = e.id AND u.usage_date BETWEEN :start_date AND :end_date) as total_duration,
+                (SELECT COUNT(*) FROM maintenance m WHERE m.equipment_id = e.id AND m.scheduled_date BETWEEN :start_date AND :end_date) as maintenance_count,
+                (SELECT COALESCE(AVG(u.session_rating), 0) FROM equipment_usage u WHERE u.equipment_id = e.id AND u.usage_date BETWEEN :start_date AND :end_date) as avg_rating
+                FROM equipment e WHERE e.is_active = TRUE";
+            break;
     }
     
-    return $data;
-}
-
-// Get report data
-$reportData = [];
-if ($equipmentTableExists && ($reportType != 'maintenance' || $maintenanceTableExists)) {
-    $reportData = getReportDataForDisplay($conn, $reportType, $startDate, $endDate, $equipmentType, $status);
-}
-
-// Get summary statistics
-$totalEquipment = 0;
-$availableEquipment = 0;
-$inUseEquipment = 0;
-$maintenanceEquipment = 0;
-$retiredEquipment = 0;
-
-if ($equipmentTableExists) {
-    try {
-        $statsQuery = "SELECT 
-                      COUNT(*) as total,
-                      SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) as available,
-                      SUM(CASE WHEN status = 'in_use' THEN 1 ELSE 0 END) as in_use,
-                      SUM(CASE WHEN status = 'maintenance' THEN 1 ELSE 0 END) as maintenance,
-                      SUM(CASE WHEN status = 'retired' THEN 1 ELSE 0 END) as retired
-                      FROM equipment";
-        
-        $stmt = $conn->query($statsQuery);
-        if ($stmt && $row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $totalEquipment = $row['total'];
-            $availableEquipment = $row['available'];
-            $inUseEquipment = $row['in_use'];
-            $maintenanceEquipment = $row['maintenance'];
-            $retiredEquipment = $row['retired'];
-        }
-    } catch (PDOException $e) {
-        error_log("Error getting equipment statistics: " . $e->getMessage());
+    // Add filters
+    $params = [];
+    if ($reportType !== 'inventory') {
+        $params[':start_date'] = $startDate;
+        $params[':end_date'] = $endDate;
     }
+    
+    if (!empty($equipmentType)) {
+        $query .= " AND e.type = :equipment_type";
+        $params[':equipment_type'] = $equipmentType;
+    }
+    
+    if (!empty($status)) {
+        if ($reportType === 'maintenance') {
+            $query .= " AND m.status = :status";
+        } else {
+            $query .= " AND e.status = :status";
+        }
+        $params[':status'] = $status;
+    }
+    
+    if (!empty($location)) {
+        $query .= " AND e.location = :location";
+        $params[':location'] = $location;
+    }
+    
+    $query .= " ORDER BY e.name";
+    
+    $stmt = $conn->prepare($query);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
+    
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 
 // Get chart data
-$chartData = [];
-
-// Equipment by type chart
-if ($equipmentTableExists) {
-    try {
-        $typeChartQuery = "SELECT type, COUNT(*) as count FROM equipment GROUP BY type ORDER BY count DESC";
-        $stmt = $conn->query($typeChartQuery);
-        if ($stmt) {
-            $chartData['equipmentByType'] = [];
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $chartData['equipmentByType'][] = $row;
-            }
-        }
-    } catch (PDOException $e) {
-        error_log("Error getting equipment type chart data: " . $e->getMessage());
-    }
+function getChartData($conn, $startDate, $endDate) {
+    $chartData = [];
+    
+    // Equipment by type
+    $typeStmt = $conn->prepare("SELECT type, COUNT(*) as count FROM equipment WHERE is_active = TRUE GROUP BY type ORDER BY count DESC");
+    $typeStmt->execute();
+    $chartData['equipmentByType'] = $typeStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Equipment by status
+    $statusStmt = $conn->prepare("SELECT status, COUNT(*) as count FROM equipment WHERE is_active = TRUE GROUP BY status");
+    $statusStmt->execute();
+    $chartData['equipmentByStatus'] = $statusStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Maintenance trends (last 6 months)
+    $maintenanceTrendStmt = $conn->prepare("
+        SELECT 
+            DATE_FORMAT(scheduled_date, '%Y-%m') as month,
+            COUNT(*) as count,
+            COALESCE(SUM(cost), 0) as total_cost,
+            COALESCE(AVG(actual_duration), 0) as avg_duration
+        FROM maintenance 
+        WHERE scheduled_date BETWEEN DATE_SUB(:end_date, INTERVAL 6 MONTH) AND :end_date
+        GROUP BY month
+        ORDER BY month
+    ");
+    $maintenanceTrendStmt->bindParam(':end_date', $endDate);
+    $maintenanceTrendStmt->execute();
+    $chartData['maintenanceTrend'] = $maintenanceTrendStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Usage trends (last 30 days)
+    $usageTrendStmt = $conn->prepare("
+        SELECT 
+            usage_date as date,
+            COUNT(*) as sessions,
+            COALESCE(SUM(duration_minutes), 0) as total_duration,
+            COUNT(DISTINCT equipment_id) as equipment_used
+        FROM equipment_usage 
+        WHERE usage_date BETWEEN DATE_SUB(:end_date, INTERVAL 30 DAY) AND :end_date
+        GROUP BY usage_date
+        ORDER BY usage_date
+    ");
+    $usageTrendStmt->bindParam(':end_date', $endDate);
+    $usageTrendStmt->execute();
+    $chartData['usageTrend'] = $usageTrendStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Cost analysis by type
+    $costStmt = $conn->prepare("
+        SELECT 
+            e.type,
+            COALESCE(SUM(e.cost), 0) as purchase_cost,
+            (SELECT COALESCE(SUM(m.cost), 0) FROM maintenance m WHERE m.equipment_id = e.id) as maintenance_cost
+        FROM equipment e
+        WHERE e.is_active = TRUE
+        GROUP BY e.type
+        ORDER BY (COALESCE(SUM(e.cost), 0) + COALESCE((SELECT SUM(m.cost) FROM maintenance m WHERE m.equipment_id = e.id), 0)) DESC
+    ");
+    $costStmt->execute();
+    $chartData['costByType'] = $costStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return $chartData;
 }
 
-// Maintenance by month chart
-if ($maintenanceTableExists) {
-    try {
-        $maintenanceChartQuery = "SELECT 
-                                 DATE_FORMAT(maintenance_date, '%Y-%m') as month,
-                                 COUNT(*) as count,
-                                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-                                 SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
-                                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                                 SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
-                                 FROM maintenance 
-                                 WHERE maintenance_date BETWEEN DATE_SUB(:endDate, INTERVAL 6 MONTH) AND :endDate
-                                 GROUP BY month
-                                 ORDER BY month";
-        
-        $stmt = $conn->prepare($maintenanceChartQuery);
-        $stmt->bindParam(':endDate', $endDate);
-        $stmt->execute();
-        
-        if ($stmt) {
-            $chartData['maintenanceByMonth'] = [];
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $chartData['maintenanceByMonth'][] = $row;
-            }
+// Get report data
+$reportData = getReportData($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+$chartData = getChartData($conn, $startDate, $endDate);
+
+// Export functions
+function exportToExcel($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location) {
+    // Clean any previous output
+    ob_clean();
+    
+    header('Content-Type: application/vnd.ms-excel');
+    header('Content-Disposition: attachment; filename="equipment_report_' . $reportType . '_' . date('Y-m-d') . '.xls"');
+    header('Cache-Control: max-age=0');
+    
+    $data = getReportData($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+    
+    echo "<table border='1'>";
+    echo "<tr><td colspan='12' style='font-weight: bold; font-size: 16px; text-align: center;'>Equipment Report - " . ucfirst($reportType) . "</td></tr>";
+    echo "<tr><td colspan='12' style='text-align: center;'>Generated on: " . date('Y-m-d H:i:s') . "</td></tr>";
+    echo "<tr><td colspan='12'>&nbsp;</td></tr>";
+    
+    if (!empty($data)) {
+        // Headers
+        echo "<tr style='background-color: #f0f0f0; font-weight: bold;'>";
+        foreach (array_keys($data[0]) as $header) {
+            echo "<td>" . safeHtmlSpecialChars(ucwords(str_replace('_', ' ', $header))) . "</td>";
         }
-    } catch (PDOException $e) {
-        error_log("Error getting maintenance chart data: " . $e->getMessage());
+        echo "</tr>";
+        
+        // Data
+        foreach ($data as $row) {
+            echo "<tr>";
+            foreach ($row as $key => $cell) {
+                // Handle different data types
+                if (is_numeric($cell) && strpos($key, 'cost') !== false) {
+                    echo "<td>" . safeNumberFormat($cell, 2) . "</td>";
+                } elseif (is_numeric($cell) && strpos($key, 'rating') !== false) {
+                    echo "<td>" . safeNumberFormat($cell, 1) . "</td>";
+                } elseif (is_numeric($cell)) {
+                    echo "<td>" . safeNumberFormat($cell) . "</td>";
+                } else {
+                    echo "<td>" . safeHtmlSpecialChars($cell) . "</td>";
+                }
+            }
+            echo "</tr>";
+        }
+    } else {
+        echo "<tr><td colspan='12' style='text-align: center; padding: 20px;'>No data found for the selected criteria.</td></tr>";
     }
+    echo "</table>";
+    
+    exit();
 }
 
-// Equipment usage by type chart
-if ($equipmentTableExists) {
-    try {
-        $usageChartQuery = "SELECT e.type, COUNT(eu.id) as count, SUM(eu.duration) as total_duration
-                           FROM equipment e
-                           LEFT JOIN equipment_usage eu ON e.id = eu.equipment_id
-                           WHERE eu.usage_date BETWEEN :startDate AND :endDate
-                           GROUP BY e.type
-                           ORDER BY count DESC";
+function exportToCSV($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location) {
+    // Clean any previous output
+    ob_clean();
+    
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="equipment_report_' . $reportType . '_' . date('Y-m-d') . '.csv"');
+    header('Cache-Control: max-age=0');
+    
+    $data = getReportData($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+    
+    $output = fopen('php://output', 'w');
+    
+    // Add BOM for UTF-8
+    fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+    
+    // Add report header
+    fputcsv($output, ['Equipment Report - ' . ucfirst($reportType)]);
+    fputcsv($output, ['Generated on: ' . date('Y-m-d H:i:s')]);
+    fputcsv($output, []);
+    
+    if (!empty($data)) {
+        // Headers
+        $headers = array_map(function($header) {
+            return ucwords(str_replace('_', ' ', $header));
+        }, array_keys($data[0]));
+        fputcsv($output, $headers);
         
-        $stmt = $conn->prepare($usageChartQuery);
-        $stmt->bindParam(':startDate', $startDate);
-        $stmt->bindParam(':endDate', $endDate);
-        $stmt->execute();
-        
-        if ($stmt) {
-            $chartData['usageByType'] = [];
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $chartData['usageByType'][] = $row;
-            }
+        // Data
+        foreach ($data as $row) {
+            $cleanRow = array_map(function($cell) {
+                return $cell ?? '';
+            }, $row);
+            fputcsv($output, $cleanRow);
         }
-    } catch (PDOException $e) {
-        error_log("Error getting usage chart data: " . $e->getMessage());
+    } else {
+        fputcsv($output, ['No data found for the selected criteria.']);
     }
+    
+    fclose($output);
+    exit();
 }
 
-// Cost analysis chart
-if ($equipmentTableExists && $maintenanceTableExists) {
-    try {
-        $costChartQuery = "SELECT e.type, 
-                          SUM(e.purchase_cost) as purchase_cost,
-                          (SELECT SUM(m.cost) FROM maintenance m WHERE m.equipment_id = e.id) as maintenance_cost
-                          FROM equipment e
-                          GROUP BY e.type
-                          ORDER BY (SUM(e.purchase_cost) + IFNULL((SELECT SUM(m.cost) FROM maintenance m WHERE m.equipment_id = e.id), 0)) DESC";
+function exportToPDF($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location) {
+    // Clean any previous output
+    ob_clean();
+    
+    // Check if TCPDF is available
+    if (!class_exists('TCPDF')) {
+        // Simple HTML to PDF conversion
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: attachment; filename="equipment_report_' . $reportType . '_' . date('Y-m-d') . '.pdf"');
+        header('Cache-Control: max-age=0');
         
-        $stmt = $conn->query($costChartQuery);
-        if ($stmt) {
-            $chartData['costByType'] = [];
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $chartData['costByType'][] = $row;
+        // Create a simple PDF-like output using HTML
+        $data = getReportData($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+        
+        echo "%PDF-1.4\n";
+        echo "1 0 obj\n";
+        echo "<<\n";
+        echo "/Type /Catalog\n";
+        echo "/Pages 2 0 R\n";
+        echo ">>\n";
+        echo "endobj\n";
+        
+        echo "2 0 obj\n";
+        echo "<<\n";
+        echo "/Type /Pages\n";
+        echo "/Kids [3 0 R]\n";
+        echo "/Count 1\n";
+        echo ">>\n";
+        echo "endobj\n";
+        
+        echo "3 0 obj\n";
+        echo "<<\n";
+        echo "/Type /Page\n";
+        echo "/Parent 2 0 R\n";
+        echo "/MediaBox [0 0 612 792]\n";
+        echo "/Contents 4 0 R\n";
+        echo ">>\n";
+        echo "endobj\n";
+        
+        $content = "BT\n";
+        $content .= "/F1 12 Tf\n";
+        $content .= "100 700 Td\n";
+        $content .= "(Equipment Report - " . ucfirst($reportType) . ") Tj\n";
+        $content .= "0 -20 Td\n";
+        $content .= "(Generated on: " . date('Y-m-d H:i:s') . ") Tj\n";
+        $content .= "ET\n";
+        
+        echo "4 0 obj\n";
+        echo "<<\n";
+        echo "/Length " . strlen($content) . "\n";
+        echo ">>\n";
+        echo "stream\n";
+        echo $content;
+        echo "endstream\n";
+        echo "endobj\n";
+        
+        echo "xref\n";
+        echo "0 5\n";
+        echo "0000000000 65535 f \n";
+        echo "0000000009 00000 n \n";
+        echo "0000000074 00000 n \n";
+        echo "0000000120 00000 n \n";
+        echo "0000000179 00000 n \n";
+        echo "trailer\n";
+        echo "<<\n";
+        echo "/Size 5\n";
+        echo "/Root 1 0 R\n";
+        echo ">>\n";
+        echo "startxref\n";
+        echo "492\n";
+        echo "%%EOF\n";
+        
+        exit();
+    } else {
+        // Use TCPDF if available
+        require_once('tcpdf/tcpdf.php');
+        
+        $pdf = new TCPDF(PDF_PAGE_ORIENTATION, PDF_UNIT, PDF_PAGE_FORMAT, true, 'UTF-8', false);
+        
+        $pdf->SetCreator('EliteFit Gym Equipment Manager');
+        $pdf->SetAuthor('Equipment Manager');
+        $pdf->SetTitle('Equipment Report - ' . ucfirst($reportType));
+        $pdf->SetSubject('Equipment Report');
+        
+        $pdf->SetDefaultMonospacedFont(PDF_FONT_MONOSPACED);
+        $pdf->SetMargins(PDF_MARGIN_LEFT, PDF_MARGIN_TOP, PDF_MARGIN_RIGHT);
+        $pdf->SetHeaderMargin(PDF_MARGIN_HEADER);
+        $pdf->SetFooterMargin(PDF_MARGIN_FOOTER);
+        $pdf->SetAutoPageBreak(TRUE, PDF_MARGIN_BOTTOM);
+        
+        $pdf->AddPage();
+        
+        $html = '<h1>Equipment Report - ' . ucfirst($reportType) . '</h1>';
+        $html .= '<p>Generated on: ' . date('Y-m-d H:i:s') . '</p>';
+        
+        $data = getReportData($conn, $reportType, $startDate, $endDate, $equipmentType, $status, $location);
+        
+        if (!empty($data)) {
+            $html .= '<table border="1" cellpadding="4">';
+            $html .= '<tr style="background-color: #f0f0f0;">';
+            foreach (array_keys($data[0]) as $header) {
+                $html .= '<th>' . safeHtmlSpecialChars(ucwords(str_replace('_', ' ', $header))) . '</th>';
             }
-        }
-    } catch (PDOException $e) {
-        error_log("Error getting cost chart data: " . $e->getMessage());
-    }
-}
-
-// Get maintenance trends
-$maintenanceTrends = [];
-if ($maintenanceTableExists) {
-    try {
-        $trendsQuery = "SELECT 
-                       DATE_FORMAT(maintenance_date, '%Y-%m') as month,
-                       COUNT(*) as total,
-                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-                       SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
-                       SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled,
-                       AVG(cost) as avg_cost
-                       FROM maintenance
-                       WHERE maintenance_date BETWEEN DATE_SUB(:endDate, INTERVAL 6 MONTH) AND :endDate
-                       GROUP BY month
-                       ORDER BY month";
-        
-        $stmt = $conn->prepare($trendsQuery);
-        $stmt->bindParam(':endDate', $endDate);
-        $stmt->execute();
-        
-        if ($stmt) {
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $maintenanceTrends[] = $row;
+            $html .= '</tr>';
+            
+            foreach ($data as $row) {
+                $html .= '<tr>';
+                foreach ($row as $cell) {
+                    $html .= '<td>' . safeHtmlSpecialChars($cell) . '</td>';
+                }
+                $html .= '</tr>';
             }
+            $html .= '</table>';
+        } else {
+            $html .= '<p>No data found for the selected criteria.</p>';
         }
-    } catch (PDOException $e) {
-        error_log("Error getting maintenance trends: " . $e->getMessage());
-    }
-}
-
-// Get top used equipment
-$topEquipment = [];
-if ($equipmentTableExists) {
-    try {
-        $topQuery = "SELECT e.id, e.name, e.type, COUNT(eu.id) as usage_count, SUM(eu.duration) as total_duration
-                    FROM equipment e
-                    LEFT JOIN equipment_usage eu ON e.id = eu.equipment_id
-                    WHERE eu.usage_date BETWEEN :startDate AND :endDate
-                    GROUP BY e.id
-                    ORDER BY usage_count DESC
-                    LIMIT 5";
         
-        $stmt = $conn->prepare($topQuery);
-        $stmt->bindParam(':startDate', $startDate);
-        $stmt->bindParam(':endDate', $endDate);
-        $stmt->execute();
+        $pdf->writeHTML($html, true, false, true, false, '');
         
-        if ($stmt) {
-            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $topEquipment[] = $row;
-            }
-        }
-    } catch (PDOException $e) {
-        error_log("Error getting top equipment: " . $e->getMessage());
-    }
-}
-
-// Get maintenance cost summary
-$maintenanceCostSummary = [];
-if ($maintenanceTableExists) {
-    try {
-        $costSummaryQuery = "SELECT 
-                            SUM(cost) as total_cost,
-                            AVG(cost) as avg_cost,
-                            MIN(cost) as min_cost,
-                            MAX(cost) as max_cost,
-                            COUNT(*) as count
-                            FROM maintenance
-                            WHERE maintenance_date BETWEEN :startDate AND :endDate";
-        
-        $stmt = $conn->prepare($costSummaryQuery);
-        $stmt->bindParam(':startDate', $startDate);
-        $stmt->bindParam(':endDate', $endDate);
-        $stmt->execute();
-        
-        if ($stmt && $row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $maintenanceCostSummary = $row;
-        }
-    } catch (PDOException $e) {
-        error_log("Error getting maintenance cost summary: " . $e->getMessage());
+        $pdf->Output('equipment_report_' . $reportType . '_' . date('Y-m-d') . '.pdf', 'D');
+        exit();
     }
 }
 ?>
@@ -648,410 +635,686 @@ if ($maintenanceTableExists) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reports - Equipment Manager</title>
+    <title>Advanced Reports - EliteFit Gym Equipment Manager</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        <?php echo generateInlineCSS($theme); ?>
-        
         :root {
-            --primary: #ff6600;
-            --primary-hover: #e65c00;
-            --secondary: #222222;
-            --dark: #121212;
-            --darker: #0a0a0a;
-            --light: #f8f9fa;
+            --primary-orange: #ff6600;
+            --primary-orange-dark: #e55a00;
+            --primary-orange-light: #ff8533;
+            --black: #000000;
+            --dark-gray: #1a1a1a;
+            --medium-gray: #2d2d2d;
+            --light-gray: #3d3d3d;
+            --text-light: #ffffff;
+            --text-dark: #000000;
             --success: #28a745;
             --danger: #dc3545;
             --warning: #ffc107;
             --info: #17a2b8;
-            --border-radius: 8px;
-            --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            --transition: all 0.3s ease;
+            --border-radius: 12px;
+            --shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            --shadow-dark: 0 4px 20px rgba(0, 0, 0, 0.3);
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
         }
         
         body {
-            background-color: var(--primary-bg);
-            color: var(--text-color);
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            transition: background-color 0.3s, color 0.3s;
-        }
-        
-        .navbar {
-            background-color: var(--secondary-bg);
-            border-bottom: 1px solid var(--border-color);
-            padding: 0.5rem 1rem;
-        }
-        
-        .sidebar {
-            background-color: var(--secondary-bg);
-            min-height: calc(100vh - 56px);
-            border-right: 1px solid var(--border-color);
-            transition: all 0.3s;
-            width: 250px;
-            position: fixed;
-            top: 56px;
-            left: 0;
-            bottom: 0;
-            z-index: 100;
-            overflow-y: auto;
-            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
-        }
-        
-        .sidebar .nav-link {
-            color: var(--text-color);
-            border-radius: 5px;
-            margin: 5px 10px;
-            padding: 10px 15px;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-        }
-        
-        .sidebar .nav-link:hover, .sidebar .nav-link.active {
-            background-color: var(--accent-color);
-            color: white;
-            transform: translateX(5px);
-        }
-        
-        .sidebar .nav-link i {
-            margin-right: 10px;
-            width: 20px;
-            text-align: center;
-        }
-        
-        .main-content {
-            margin-left: 250px;
-            padding: 20px;
-            transition: all 0.3s;
-        }
-        
-        @media (max-width: 768px) {
-            .sidebar {
-                width: 70px;
-                transform: translateX(0);
-            }
-            
-            .sidebar.collapsed {
-                transform: translateX(-100%);
-            }
-            
-            .sidebar .nav-link span {
-                display: none;
-            }
-            
-            .sidebar .nav-link i {
-                margin-right: 0;
-                font-size: 1.2rem;
-            }
-            
-            .main-content {
-                margin-left: 70px;
-            }
-            
-            .main-content.expanded {
-                margin-left: 0;
-            }
-        }
-        
-        .card {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: var(--border-radius);
-            box-shadow: var(--box-shadow);
-            margin-bottom: 20px;
-            transition: transform 0.3s, box-shadow 0.3s;
-            overflow: hidden;
-        }
-        
-        .card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.1);
-        }
-        
-        .card-header {
-            background-color: var(--accent-color);
-            color: white;
-            border-radius: var(--border-radius) var(--border-radius) 0 0 !important;
-            font-weight: bold;
-            padding: 15px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .card-body {
-            padding: 20px;
-        }
-        
-        .btn-primary {
-            background-color: var(--accent-color);
-            border-color: var(--accent-color);
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            color: var(--text-dark);
+            min-height: 100vh;
             transition: var(--transition);
         }
         
-        .btn-primary:hover {
-            background-color: var(--accent-hover);
-            border-color: var(--accent-hover);
-            transform: translateY(-2px);
+        body.dark-theme {
+            background: linear-gradient(135deg, var(--black) 0%, var(--dark-gray) 100%);
+            color: var(--text-light);
         }
         
-        .btn-outline-primary {
-            color: var(--accent-color);
-            border-color: var(--accent-color);
+        .dashboard-container {
+            display: flex;
+            min-height: 100vh;
         }
         
-        .btn-outline-primary:hover {
-            background-color: var(--accent-color);
-            color: white;
+        .sidebar {
+            width: 280px;
+            background: linear-gradient(180deg, var(--black) 0%, var(--dark-gray) 100%);
+            color: var(--text-light);
+            padding: 25px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            z-index: 1000;
+            transition: var(--transition);
+            box-shadow: var(--shadow-dark);
         }
         
-        .theme-switch {
-            position: relative;
-            display: inline-block;
-            width: 60px;
-            height: 34px;
+        .sidebar::-webkit-scrollbar {
+            width: 6px;
         }
         
-        .theme-switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
+        .sidebar::-webkit-scrollbar-track {
+            background: var(--medium-gray);
         }
         
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: #ccc;
-            transition: .4s;
-            border-radius: 34px;
+        .sidebar::-webkit-scrollbar-thumb {
+            background: var(--primary-orange);
+            border-radius: 3px;
         }
         
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 26px;
-            width: 26px;
-            left: 4px;
-            bottom: 4px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid var(--primary-orange);
         }
         
-        input:checked + .slider {
-            background-color: var(--accent-color);
+        .sidebar-header .logo {
+            width: 50px;
+            height: 50px;
+            background: linear-gradient(45deg, var(--primary-orange), var(--primary-orange-light));
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
         }
         
-        input:checked + .slider:before {
-            transform: translateX(26px);
+        .sidebar-header h2 {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: var(--text-light);
+            margin: 0;
         }
         
-        .table {
-            color: var(--text-color);
-            border-collapse: separate;
-            border-spacing: 0;
-            width: 100%;
+        .sidebar-menu {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .sidebar-menu li {
+            margin-bottom: 8px;
+        }
+        
+        .sidebar-menu a {
+            display: flex;
+            align-items: center;
+            padding: 15px 18px;
+            color: rgba(255, 255, 255, 0.8);
+            text-decoration: none;
             border-radius: var(--border-radius);
+            transition: var(--transition);
+            font-weight: 500;
+            position: relative;
             overflow: hidden;
         }
         
-        .table thead th {
-            background-color: var(--secondary-bg);
-            border-color: var(--border-color);
-            padding: 12px 15px;
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.85rem;
-            letter-spacing: 0.5px;
+        .sidebar-menu a::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 102, 0, 0.1), transparent);
+            transition: var(--transition);
         }
         
-        .table tbody td {
-            border-color: var(--border-color);
-            padding: 12px 15px;
-            vertical-align: middle;
+        .sidebar-menu a:hover::before {
+            left: 100%;
         }
         
-        .table-hover tbody tr:hover {
-            background-color: rgba(255, 140, 0, 0.1);
+        .sidebar-menu a:hover, .sidebar-menu a.active {
+            background: linear-gradient(45deg, var(--primary-orange), var(--primary-orange-light));
+            color: var(--text-light);
+            transform: translateX(5px);
+            box-shadow: 0 8px 25px rgba(255, 102, 0, 0.3);
         }
         
-        .table-striped tbody tr:nth-of-type(odd) {
-            background-color: rgba(0, 0, 0, 0.02);
-        }
-        
-        .dark-theme .table-striped tbody tr:nth-of-type(odd) {
-            background-color: rgba(255, 255, 255, 0.02);
-        }
-        
-        .setup-card {
+        .sidebar-menu a i {
+            margin-right: 15px;
+            width: 20px;
             text-align: center;
+            font-size: 1.1rem;
+        }
+        
+        .main-content {
+            flex: 1;
+            margin-left: 280px;
             padding: 30px;
+            transition: var(--transition);
+            min-height: 100vh;
         }
         
-        .setup-card i {
-            font-size: 4rem;
-            color: var(--accent-color);
-            margin-bottom: 20px;
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 40px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            padding: 20px 30px;
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
         
-        .no-data-message {
-            text-align: center;
-            padding: 20px;
-            color: var(--text-muted);
+        .dark-theme .header {
+            background: rgba(45, 45, 45, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--black);
+            margin: 0;
+            background: linear-gradient(45deg, var(--black), var(--primary-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .dark-theme .header h1 {
+            background: linear-gradient(45deg, var(--text-light), var(--primary-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        .theme-switch {
+            display: flex;
+            align-items: center;
+            background: var(--medium-gray);
+            padding: 8px;
+            border-radius: 25px;
+            transition: var(--transition);
+        }
+        
+        .theme-switch label {
+            margin: 0 10px;
+            cursor: pointer;
+            padding: 8px 12px;
+            border-radius: 20px;
+            transition: var(--transition);
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        
+        .theme-switch label.active {
+            background: var(--primary-orange);
+            color: white;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            position: relative;
+        }
+        
+        .user-avatar {
+            width: 45px;
+            height: 45px;
+            border-radius: 50%;
+            margin-right: 12px;
+            border: 3px solid var(--primary-orange);
+            transition: var(--transition);
+        }
+        
+        .user-avatar:hover {
+            transform: scale(1.1);
+        }
+        
+        .user-details h4 {
+            margin: 0;
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+        
+        .user-details p {
+            margin: 0;
+            font-size: 0.8rem;
+            opacity: 0.7;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            padding: 25px;
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: var(--transition);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .dark-theme .stat-card {
+            background: rgba(45, 45, 45, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary-orange), var(--primary-orange-light));
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+        }
+        
+        .stat-card .icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(45deg, var(--primary-orange), var(--primary-orange-light));
+            border-radius: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 15px;
+            color: white;
+            font-size: 1.5rem;
+        }
+        
+        .stat-card h3 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin: 0 0 5px 0;
+            color: var(--primary-orange);
+        }
+        
+        .stat-card p {
+            margin: 0;
+            opacity: 0.8;
+            font-weight: 500;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            overflow: hidden;
+            transition: var(--transition);
+        }
+        
+        .dark-theme .card {
+            background: rgba(45, 45, 45, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .card-header {
+            padding: 25px 30px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(135deg, rgba(255, 102, 0, 0.05), rgba(255, 102, 0, 0.02));
+        }
+        
+        .dark-theme .card-header {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background: linear-gradient(135deg, rgba(255, 102, 0, 0.1), rgba(255, 102, 0, 0.05));
+        }
+        
+        .card-header h3 {
+            margin: 0;
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--black);
+        }
+        
+        .dark-theme .card-header h3 {
+            color: var(--text-light);
+        }
+        
+        .card-body {
+            padding: 30px;
         }
         
         .report-nav {
             display: flex;
             flex-wrap: wrap;
-            gap: 10px;
-            margin-bottom: 20px;
+            gap: 15px;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
         
-        .report-nav .nav-link {
-            color: var(--text-color);
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
+        .dark-theme .report-nav {
+            background: rgba(45, 45, 45, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .report-nav-item {
+            padding: 12px 20px;
+            background: rgba(255, 255, 255, 0.8);
+            border: 2px solid rgba(0, 0, 0, 0.1);
             border-radius: var(--border-radius);
-            padding: 10px 15px;
-            transition: all 0.2s;
+            text-decoration: none;
+            color: var(--text-dark);
+            transition: var(--transition);
             display: flex;
             align-items: center;
-            gap: 8px;
-        }
-        
-        .report-nav .nav-link:hover, .report-nav .nav-link.active {
-            background-color: var(--accent-color);
-            color: white;
-            border-color: var(--accent-color);
-            transform: translateY(-2px);
-        }
-        
-        .chart-container {
-            position: relative;
-            height: 300px;
-            width: 100%;
-            margin-bottom: 20px;
-        }
-        
-        .form-control, .form-select {
-            background-color: var(--secondary-bg);
-            border-color: var(--border-color);
-            color: var(--text-color);
-            border-radius: var(--border-radius);
-            padding: 10px 15px;
-            transition: var(--transition);
-        }
-        
-        .form-control:focus, .form-select:focus {
-            background-color: var(--secondary-bg);
-            color: var(--text-color);
-            border-color: var(--accent-color);
-            box-shadow: 0 0 0 0.25rem rgba(255, 140, 0, 0.25);
-        }
-        
-        .form-label {
+            gap: 10px;
             font-weight: 500;
-            margin-bottom: 8px;
-            color: var(--text-color);
+            position: relative;
+            overflow: hidden;
         }
         
-        .filter-section {
-            background-color: var(--card-bg);
-            border-radius: var(--border-radius);
-            padding: 20px;
-            margin-bottom: 20px;
-            border: 1px solid var(--border-color);
+        .dark-theme .report-nav-item {
+            background: rgba(45, 45, 45, 0.8);
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-light);
         }
         
-        .filter-form {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        
-        .stat-card {
-            background-color: var(--card-bg);
-            border-radius: var(--border-radius);
-            padding: 20px;
-            text-align: center;
-            border: 1px solid var(--border-color);
+        .report-nav-item::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 102, 0, 0.1), transparent);
             transition: var(--transition);
         }
         
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.1);
+        .report-nav-item:hover::before {
+            left: 100%;
         }
         
-        .stat-card .icon {
-            font-size: 2.5rem;
-            color: var(--accent-color);
-            margin-bottom: 10px;
+        .report-nav-item:hover, .report-nav-item.active {
+            background: linear-gradient(45deg, var(--primary-orange), var(--primary-orange-light));
+            color: white;
+            border-color: var(--primary-orange);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 102, 0, 0.3);
         }
         
-        .stat-card .value {
-            font-size: 2rem;
-            font-weight: bold;
-            margin-bottom: 5px;
-            color: var(--text-color);
+        .filters-section {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            overflow: hidden;
         }
         
-        .stat-card .label {
-            color: var(--text-muted);
-            font-size: 0.9rem;
+        .dark-theme .filters-section {
+            background: rgba(45, 45, 45, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
         
-        .charts-grid {
+        .filters-header {
+            padding: 20px 30px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            background: linear-gradient(135deg, rgba(255, 102, 0, 0.05), rgba(255, 102, 0, 0.02));
+        }
+        
+        .dark-theme .filters-header {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background: linear-gradient(135deg, rgba(255, 102, 0, 0.1), rgba(255, 102, 0, 0.05));
+        }
+        
+        .filters-body {
+            padding: 30px;
+        }
+        
+        .filters-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
             margin-bottom: 20px;
         }
         
-        @media (max-width: 992px) {
-            .charts-grid {
-                grid-template-columns: 1fr;
-            }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .form-group label {
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--black);
+            font-size: 0.9rem;
+        }
+        
+        .dark-theme .form-group label {
+            color: var(--text-light);
+        }
+        
+        .form-control {
+            padding: 12px 16px;
+            border: 2px solid rgba(0, 0, 0, 0.1);
+            border-radius: var(--border-radius);
+            transition: var(--transition);
+            font-size: 0.95rem;
+            background: rgba(255, 255, 255, 0.8);
+        }
+        
+        .dark-theme .form-control {
+            background: rgba(45, 45, 45, 0.8);
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-light);
+        }
+        
+        .form-control:focus {
+            border-color: var(--primary-orange);
+            outline: 0;
+            box-shadow: 0 0 0 3px rgba(255, 102, 0, 0.1);
+            background: white;
+        }
+        
+        .dark-theme .form-control:focus {
+            background: var(--medium-gray);
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            background: linear-gradient(45deg, var(--primary-orange), var(--primary-orange-light));
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: var(--transition);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.95rem;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: var(--transition);
+        }
+        
+        .btn:hover::before {
+            left: 100%;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 102, 0, 0.3);
+        }
+        
+        .btn-sm {
+            padding: 8px 16px;
+            font-size: 0.85rem;
+        }
+        
+        .btn-secondary {
+            background: linear-gradient(45deg, var(--medium-gray), var(--light-gray));
+        }
+        
+        .btn-success {
+            background: linear-gradient(45deg, var(--success), #34ce57);
+        }
+        
+        .btn-danger {
+            background: linear-gradient(45deg, var(--danger), #e74c3c);
+        }
+        
+        .btn-warning {
+            background: linear-gradient(45deg, var(--warning), #f39c12);
+            color: var(--black);
+        }
+        
+        .btn-info {
+            background: linear-gradient(45deg, var(--info), #3498db);
+        }
+        
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 350px;
+            width: 100%;
+        }
+        
+        .table-container {
+            overflow-x: auto;
+            border-radius: var(--border-radius);
+            box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+        }
+        
+        .dark-theme .table-container {
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+        }
+        
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0;
+            background: white;
+        }
+        
+        .dark-theme .table {
+            background: var(--medium-gray);
+        }
+        
+        .table th {
+            padding: 18px 20px;
+            text-align: left;
+            font-weight: 700;
+            color: var(--black);
+            background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+            border-bottom: 2px solid var(--primary-orange);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        .dark-theme .table th {
+            color: var(--text-light);
+            background: linear-gradient(135deg, var(--light-gray), var(--medium-gray));
+        }
+        
+        .table td {
+            padding: 16px 20px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+            transition: var(--transition);
+        }
+        
+        .dark-theme .table td {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .table tbody tr {
+            transition: var(--transition);
+        }
+        
+        .table tbody tr:hover {
+            background: rgba(255, 102, 0, 0.05);
+            transform: scale(1.01);
+        }
+        
+        .dark-theme .table tbody tr:hover {
+            background: rgba(255, 102, 0, 0.1);
         }
         
         .badge {
-            padding: 5px 10px;
-            border-radius: 50px;
-            font-weight: 500;
-            font-size: 0.75rem;
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: white;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         
         .badge-success {
-            background-color: var(--success-color);
-            color: white;
+            background: linear-gradient(45deg, var(--success), #27ae60);
         }
         
         .badge-warning {
-            background-color: var(--warning-color);
-            color: #212529;
-        }
-        
-        .badge-danger {
-            background-color: var(--danger-color);
-            color: white;
+            background: linear-gradient(45deg, var(--warning), #f39c12);
+            color: var(--black);
         }
         
         .badge-info {
-            background-color: var(--info-color);
-            color: white;
+            background: linear-gradient(45deg, var(--info), #3498db);
+        }
+        
+        .badge-danger {
+            background: linear-gradient(45deg, var(--danger), #e74c3c);
+        }
+        
+        .badge-secondary {
+            background: linear-gradient(45deg, var(--medium-gray), var(--light-gray));
         }
         
         .export-buttons {
@@ -1061,15 +1324,16 @@ if ($maintenanceTableExists) {
         }
         
         .export-btn {
+            padding: 8px 16px;
+            border-radius: var(--border-radius);
+            text-decoration: none;
+            color: white;
+            font-weight: 500;
+            transition: var(--transition);
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 8px 15px;
-            border-radius: var(--border-radius);
-            font-weight: 500;
-            transition: var(--transition);
-            text-decoration: none;
-            color: white;
+            font-size: 0.85rem;
         }
         
         .export-btn:hover {
@@ -1077,1133 +1341,1257 @@ if ($maintenanceTableExists) {
             color: white;
         }
         
-        .export-btn-excel {
-            background-color: #1D6F42;
+        .export-excel {
+            background: linear-gradient(45deg, #1D6F42, #2E8B57);
         }
         
-        .export-btn-pdf {
-            background-color: #F40F02;
+        .export-pdf {
+            background: linear-gradient(45deg, #F40F02, #DC143C);
         }
         
-        .export-btn-csv {
-            background-color: #217346;
+        .export-csv {
+            background: linear-gradient(45deg, #217346, #228B22);
         }
         
-        .export-btn-print {
-            background-color: #5C6BC0;
+        .export-print {
+            background: linear-gradient(45deg, #5C6BC0, #7986CB);
         }
         
-        .pagination {
-            display: flex;
-            justify-content: center;
-            margin-top: 20px;
-        }
-        
-        .pagination .page-item .page-link {
-            color: var(--accent-color);
-            background-color: var(--card-bg);
-            border-color: var(--border-color);
-        }
-        
-        .pagination .page-item.active .page-link {
-            background-color: var(--accent-color);
-            border-color: var(--accent-color);
-            color: white;
-        }
-        
-        .pagination .page-item .page-link:hover {
-            background-color: var(--accent-color);
-            color: white;
-        }
-        
-        .custom-tooltip {
+        .progress-ring {
+            width: 60px;
+            height: 60px;
             position: relative;
             display: inline-block;
         }
         
-        .custom-tooltip .tooltip-text {
-            visibility: hidden;
-            width: 120px;
-            background-color: var(--secondary-bg);
-            color: var(--text-color);
-            text-align: center;
-            border-radius: 6px;
-            padding: 5px;
-            position: absolute;
-            z-index: 1;
-            bottom: 125%;
-            left: 50%;
-            margin-left: -60px;
-            opacity: 0;
-            transition: opacity 0.3s;
-            font-size: 0.8rem;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
-            border: 1px solid var(--border-color);
+        .progress-ring svg {
+            width: 100%;
+            height: 100%;
+            transform: rotate(-90deg);
         }
         
-        .custom-tooltip:hover .tooltip-text {
-            visibility: visible;
-            opacity: 1;
+        .progress-ring circle {
+            fill: none;
+            stroke-width: 4;
+            stroke-linecap: round;
         }
         
-        .summary-section {
-            background-color: var(--card-bg);
-            border-radius: var(--border-radius);
-            padding: 20px;
-            margin-bottom: 20px;
-            border: 1px solid var(--border-color);
+        .progress-ring .background {
+            stroke: rgba(255, 255, 255, 0.1);
         }
         
-        .trend-indicator {
+        .progress-ring .progress {
+            stroke: var(--primary-orange);
+            stroke-dasharray: 157;
+            stroke-dashoffset: 157;
+            transition: stroke-dashoffset 0.5s ease;
+        }
+        
+        .floating-action-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(45deg, var(--primary-orange), var(--primary-orange-light));
+            border-radius: 50%;
             display: flex;
             align-items: center;
-            gap: 5px;
-            font-size: 0.85rem;
+            justify-content: center;
+            color: white;
+            font-size: 1.5rem;
+            box-shadow: 0 8px 25px rgba(255, 102, 0, 0.3);
+            cursor: pointer;
+            transition: var(--transition);
+            z-index: 1000;
+            border: none;
         }
         
-        .trend-up {
-            color: var(--success-color);
+        .floating-action-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 12px 35px rgba(255, 102, 0, 0.4);
         }
         
-        .trend-down {
-            color: var(--danger-color);
+        .alert {
+            padding: 16px 20px;
+            border-radius: var(--border-radius);
+            margin-bottom: 25px;
+            border-left: 4px solid;
+            animation: slideInDown 0.3s ease;
         }
         
-        .trend-neutral {
-            color: var(--text-muted);
+        .alert-success {
+            background: rgba(40, 167, 69, 0.1);
+            color: var(--success);
+            border-left-color: var(--success);
         }
         
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
+        .alert-danger {
+            background: rgba(220, 53, 69, 0.1);
+            color: var(--danger);
+            border-left-color: var(--danger);
         }
         
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: var(--secondary-bg);
-            border-radius: 10px;
+        .alert-warning {
+            background: rgba(255, 193, 7, 0.1);
+            color: #856404;
+            border-left-color: var(--warning);
         }
         
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: var(--accent-color);
-            border-radius: 10px;
+        .alert-info {
+            background: rgba(23, 162, 184, 0.1);
+            color: var(--info);
+            border-left-color: var(--info);
         }
         
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: var(--accent-hover);
+        @keyframes slideInDown {
+            from { transform: translateY(-20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
         }
         
-        @media print {
-            .sidebar, .navbar, .filter-section, .export-buttons, .pagination, .no-print {
-                display: none !important;
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        
+        @media (max-width: 1200px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .filters-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 70px;
+                padding: 20px 10px;
+            }
+            
+            .sidebar-header h2,
+            .sidebar-menu a span {
+                display: none;
             }
             
             .main-content {
-                margin-left: 0 !important;
-                padding: 0 !important;
+                margin-left: 70px;
+                padding: 20px;
             }
             
-            .card {
-                break-inside: avoid;
-                box-shadow: none !important;
-                border: 1px solid #ddd !important;
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
             }
             
-            body {
-                background-color: white !important;
-                color: black !important;
+            .header-controls {
+                align-self: flex-end;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .report-nav {
+                flex-direction: column;
+            }
+            
+            .export-buttons {
+                flex-wrap: wrap;
             }
         }
     </style>
 </head>
-<body>
-    <!-- Navbar -->
-    <nav class="navbar navbar-expand-lg">
-        <div class="container-fluid">
-            <a class="navbar-brand" href="#" style="color: var(--accent-color);">
-                <i class="fas fa-tools me-2"></i>
-                Equipment Manager
-            </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item">
-                        <div class="d-flex align-items-center">
-                            <span class="me-2" style="color: var(--text-color);">
-                                <?php echo $theme === 'dark' ? 'Dark' : 'Light'; ?> Mode
-                            </span>
-                            <label class="theme-switch">
-                                <input type="checkbox" id="theme-toggle" <?php echo $theme === 'dark' ? 'checked' : ''; ?>>
-                                <span class="slider"></span>
-                            </label>
-                        </div>
-                    </li>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" style="color: var(--text-color);">
-                            <i class="fas fa-user-circle me-1"></i>
-                            <?php echo htmlspecialchars($userName); ?>
-                        </a>
-                        <ul class="dropdown-menu dropdown-menu-end" style="background-color: var(--secondary-bg);">
-                            <li><a class="dropdown-item" href="../profile.php" style="color: var(--text-color);">Profile</a></li>
-                            <li><a class="dropdown-item" href="../settings.php" style="color: var(--text-color);">Settings</a></li>
-                            <li><hr class="dropdown-divider" style="border-color: var(--border-color);"></li>
-                            <li><a class="dropdown-item" href="../logout.php" style="color: var(--danger-color);">Logout</a></li>
-                        </ul>
-                    </li>
-                </ul>
+<body class="<?php echo $theme === 'light' ? '' : 'dark-theme'; ?>">
+<div class="dashboard-container">
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <i class="fas fa-chart-line"></i>
+            </div>
+            <h2>EliteFit Gym</h2>
+        </div>
+        <ul class="sidebar-menu">
+            <li><a href="dashboard.php"><i class="fas fa-home"></i> <span>Dashboard</span></a></li>
+            <li><a href="equipment.php"><i class="fas fa-dumbbell"></i> <span>Equipment</span></a></li>
+            <li><a href="maintenance.php"><i class="fas fa-tools"></i> <span>Maintenance</span></a></li>
+            <li><a href="inventory.php"><i class="fas fa-clipboard-list"></i> <span>Inventory</span></a></li>
+            <li><a href="calendar.php" class="active"><i class="fas fa-calendar-alt"></i> <span>Calendar</span></a></li>
+            <li><a href="report.php" class="active"><i class="fas fa-chart-line"></i> <span>Reports</span></a></li>
+            <li><a href="settings.php"><i class="fas fa-cog"></i> <span>Settings</span></a></li>
+            <li><a href="../logout.php"><i class="fas fa-sign-out-alt"></i> <span>Logout</span></a></li>
+        </ul>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Header -->
+        <div class="header">
+            <h1>Advanced Reports & Analytics</h1>
+            <div class="header-controls">
+                <div class="theme-switch">
+                    <label class="<?php echo $theme === 'light' ? 'active' : ''; ?>" onclick="switchTheme('light')">
+                        <i class="fas fa-sun"></i> Light
+                    </label>
+                    <label class="<?php echo $theme === 'dark' ? 'active' : ''; ?>" onclick="switchTheme('dark')">
+                        <i class="fas fa-moon"></i> Dark
+                    </label>
+                </div>
+                <div class="user-info">
+                    <img src="https://randomuser.me/api/portraits/men/3.jpg" alt="User Avatar" class="user-avatar">
+                    <div class="user-details">
+                        <h4><?php echo safeHtmlSpecialChars($userName); ?></h4>
+                        <p>Equipment Manager</p>
+                    </div>
+                </div>
             </div>
         </div>
-    </nav>
-
-    <div class="container-fluid">
-        <div class="row">
-            <!-- Sidebar -->
-            <div class="col-md-3 col-lg-2 sidebar p-3">
-                <ul class="nav flex-column">
-                    <li class="nav-item">
-                        <a class="nav-link" href="dashboard.php">
-                            <i class="fas fa-tachometer-alt"></i> Dashboard
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="inventory.php">
-                            <i class="fas fa-boxes"></i> Inventory
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="maintenance.php">
-                            <i class="fas fa-wrench"></i> Maintenance
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="report.php">
-                            <i class="fas fa-chart-bar"></i> Reports
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="settings.php">
-                            <i class="fas fa-cog"></i> Settings
-                        </a>
-                    </li>
-                </ul>
+        
+        <!-- Alert Messages -->
+        <?php if (!empty($message)): ?>
+            <div class="alert alert-<?php echo $messageType; ?> animate__animated animate__fadeInDown">
+                <i class="fas fa-<?php echo $messageType === 'success' ? 'check-circle' : ($messageType === 'danger' ? 'exclamation-circle' : 'exclamation-triangle'); ?>"></i>
+                <?php echo $message; ?>
             </div>
-
-            <!-- Main Content -->
-            <div class="col-md-9 col-lg-10 main-content p-4">
-                <h2 class="mb-4">Advanced Reports</h2>
-                
-                <?php if (!$equipmentTableExists || !$maintenanceTableExists): ?>
-                <!-- Database Setup Required -->
-                <div class="card setup-card">
-                    <div class="card-body">
-                        <i class="fas fa-database"></i>
-                        <h3 class="mb-3">Database Setup Required</h3>
-                        <p class="mb-4">The required database tables for the Equipment Manager do not exist. Please run the database setup script to create the necessary tables.</p>
-                        <a href="setup_database.php" class="btn btn-primary">Run Database Setup</a>
-                    </div>
+        <?php endif; ?>
+        
+        <!-- Statistics Overview -->
+        <div class="stats-grid">
+            <div class="stat-card animate__animated animate__fadeInUp">
+                <div class="icon">
+                    <i class="fas fa-dumbbell"></i>
                 </div>
-                <?php else: ?>
-                
-                <!-- Stats Overview -->
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="icon"><i class="fas fa-boxes"></i></div>
-                        <div class="value"><?php echo $totalEquipment; ?></div>
-                        <div class="label">Total Equipment</div>
-                    </div>
-                    
-                    <div class="stat-card">
-                        <div class="icon" style="color: var(--success-color);"><i class="fas fa-check-circle"></i></div>
-                        <div class="value"><?php echo $availableEquipment; ?></div>
-                        <div class="label">Available</div>
-                    </div>
-                    
-                    <div class="stat-card">
-                        <div class="icon" style="color: var(--info-color);"><i class="fas fa-users"></i></div>
-                        <div class="value"><?php echo $inUseEquipment; ?></div>
-                        <div class="label">In Use</div>
-                    </div>
-                    
-                    <div class="stat-card">
-                        <div class="icon" style="color: var(--warning-color);"><i class="fas fa-tools"></i></div>
-                        <div class="value"><?php echo $maintenanceEquipment; ?></div>
-                        <div class="label">Under Maintenance</div>
-                    </div>
-                    
-                    <div class="stat-card">
-                        <div class="icon" style="color: var(--danger-color);"><i class="fas fa-archive"></i></div>
-                        <div class="value"><?php echo $retiredEquipment; ?></div>
-                        <div class="label">Retired</div>
-                    </div>
+                <h3><?php echo safeNumberFormat($stats['total']); ?></h3>
+                <p>Total Equipment</p>
+            </div>
+            <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.1s;">
+                <div class="icon" style="background: linear-gradient(45deg, var(--success), #27ae60);">
+                    <i class="fas fa-check-circle"></i>
                 </div>
-                
-                <!-- Report Navigation -->
-                <div class="report-nav">
-                    <a href="?type=inventory" class="nav-link <?php echo $reportType === 'inventory' ? 'active' : ''; ?>">
-                        <i class="fas fa-boxes"></i> Inventory
-                    </a>
-                    <a href="?type=maintenance" class="nav-link <?php echo $reportType === 'maintenance' ? 'active' : ''; ?>">
-                        <i class="fas fa-wrench"></i> Maintenance
-                    </a>
-                    <a href="?type=usage" class="nav-link <?php echo $reportType === 'usage' ? 'active' : ''; ?>">
-                        <i class="fas fa-chart-line"></i> Usage
-                    </a>
-                    <a href="?type=cost" class="nav-link <?php echo $reportType === 'cost' ? 'active' : ''; ?>">
-                        <i class="fas fa-dollar-sign"></i> Cost Analysis
-                    </a>
-                    <a href="?type=performance" class="nav-link <?php echo $reportType === 'performance' ? 'active' : ''; ?>">
-                        <i class="fas fa-tachometer-alt"></i> Performance
-                    </a>
+                <h3><?php echo safeNumberFormat($stats['available']); ?></h3>
+                <p>Available</p>
+            </div>
+            <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.2s;">
+                <div class="icon" style="background: linear-gradient(45deg, var(--info), #3498db);">
+                    <i class="fas fa-play-circle"></i>
                 </div>
-                
-                <!-- Filters -->
-                <div class="filter-section">
-                    <h5 class="mb-3"><i class="fas fa-filter me-2"></i>Report Filters</h5>
-                    <form action="report.php" method="GET" class="filter-form">
-                        <input type="hidden" name="type" value="<?php echo $reportType; ?>">
-                        
-                        <?php if ($reportType != 'inventory'): ?>
+                <h3><?php echo safeNumberFormat($stats['in_use']); ?></h3>
+                <p>In Use</p>
+            </div>
+            <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.3s;">
+                <div class="icon" style="background: linear-gradient(45deg, var(--warning), #f39c12);">
+                    <i class="fas fa-tools"></i>
+                </div>
+                <h3><?php echo safeNumberFormat($stats['maintenance']); ?></h3>
+                <p>Maintenance</p>
+            </div>
+            <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.4s;">
+                <div class="icon" style="background: linear-gradient(45deg, var(--danger), #e74c3c);">
+                    <i class="fas fa-exclamation-triangle"></i>
+                </div>
+                <h3><?php echo safeNumberFormat($stats['out_of_order']); ?></h3>
+                <p>Out of Order</p>
+            </div>
+            <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.5s;">
+                <div class="icon" style="background: linear-gradient(45deg, #2ecc71, #27ae60);">
+                    <i class="fas fa-dollar-sign"></i>
+                </div>
+                <h3>$<?php echo safeNumberFormat($stats['total_value'], 0); ?></h3>
+                <p>Total Value</p>
+            </div>
+        </div>
+        
+        <!-- Report Navigation -->
+        <div class="report-nav animate__animated animate__fadeInUp" style="animation-delay: 0.6s;">
+            <a href="?type=overview" class="report-nav-item <?php echo $reportType === 'overview' ? 'active' : ''; ?>">
+                <i class="fas fa-chart-pie"></i>
+                <span>Overview</span>
+            </a>
+            <a href="?type=inventory" class="report-nav-item <?php echo $reportType === 'inventory' ? 'active' : ''; ?>">
+                <i class="fas fa-boxes"></i>
+                <span>Inventory</span>
+            </a>
+            <a href="?type=maintenance" class="report-nav-item <?php echo $reportType === 'maintenance' ? 'active' : ''; ?>">
+                <i class="fas fa-tools"></i>
+                <span>Maintenance</span>
+            </a>
+            <a href="?type=usage" class="report-nav-item <?php echo $reportType === 'usage' ? 'active' : ''; ?>">
+                <i class="fas fa-chart-line"></i>
+                <span>Usage Analytics</span>
+            </a>
+            <a href="?type=cost" class="report-nav-item <?php echo $reportType === 'cost' ? 'active' : ''; ?>">
+                <i class="fas fa-dollar-sign"></i>
+                <span>Cost Analysis</span>
+            </a>
+            <a href="?type=performance" class="report-nav-item <?php echo $reportType === 'performance' ? 'active' : ''; ?>">
+                <i class="fas fa-tachometer-alt"></i>
+                <span>Performance</span>
+            </a>
+        </div>
+        
+        <!-- Filters Section -->
+        <div class="filters-section animate__animated animate__fadeInUp" style="animation-delay: 0.7s;">
+            <div class="filters-header">
+                <h3><i class="fas fa-filter"></i> Report Filters</h3>
+            </div>
+            <div class="filters-body">
+                <form action="" method="GET">
+                    <input type="hidden" name="type" value="<?php echo $reportType; ?>">
+                    <div class="filters-grid">
+                        <?php if ($reportType !== 'inventory'): ?>
                         <div class="form-group">
-                            <label for="start_date" class="form-label">Start Date</label>
-                            <input type="date" class="form-control" id="start_date" name="start_date" value="<?php echo $startDate; ?>">
+                            <label for="start_date">Start Date</label>
+                            <input type="date" id="start_date" name="start_date" class="form-control" value="<?php echo $startDate; ?>">
                         </div>
-                        
                         <div class="form-group">
-                            <label for="end_date" class="form-label">End Date</label>
-                            <input type="date" class="form-control" id="end_date" name="end_date" value="<?php echo $endDate; ?>">
+                            <label for="end_date">End Date</label>
+                            <input type="date" id="end_date" name="end_date" class="form-control" value="<?php echo $endDate; ?>">
                         </div>
                         <?php endif; ?>
-                        
                         <div class="form-group">
-                            <label for="equipment_type" class="form-label">Equipment Type</label>
-                            <select class="form-select" id="equipment_type" name="equipment_type">
+                            <label for="equipment_type">Equipment Type</label>
+                            <select id="equipment_type" name="equipment_type" class="form-control">
                                 <option value="">All Types</option>
                                 <?php foreach ($equipmentTypes as $type): ?>
-                                <option value="<?php echo htmlspecialchars($type); ?>" <?php echo $equipmentType === $type ? 'selected' : ''; ?>>
-                                    <?php echo htmlspecialchars($type); ?>
-                                </option>
+                                    <option value="<?php echo safeHtmlSpecialChars($type); ?>" <?php echo $equipmentType === $type ? 'selected' : ''; ?>>
+                                        <?php echo safeHtmlSpecialChars($type); ?>
+                                    </option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        
-                        <?php if ($reportType === 'inventory' || $reportType === 'maintenance'): ?>
                         <div class="form-group">
-                            <label for="status" class="form-label">Status</label>
-                            <select class="form-select" id="status" name="status">
+                            <label for="status">Status</label>
+                            <select id="status" name="status" class="form-control">
                                 <option value="">All Statuses</option>
-                                <?php 
-                                $statuses = $reportType === 'inventory' ? $equipmentStatuses : $maintenanceStatuses;
-                                foreach ($statuses as $statusOption): 
-                                ?>
-                                <option value="<?php echo $statusOption; ?>" <?php echo $status === $statusOption ? 'selected' : ''; ?>>
-                                    <?php echo ucfirst($statusOption); ?>
-                                </option>
+                                <option value="Available" <?php echo $status === 'Available' ? 'selected' : ''; ?>>Available</option>
+                                <option value="In Use" <?php echo $status === 'In Use' ? 'selected' : ''; ?>>In Use</option>
+                                <option value="Maintenance" <?php echo $status === 'Maintenance' ? 'selected' : ''; ?>>Maintenance</option>
+                                <option value="Out of Order" <?php echo $status === 'Out of Order' ? 'selected' : ''; ?>>Out of Order</option>
+                                <option value="Retired" <?php echo $status === 'Retired' ? 'selected' : ''; ?>>Retired</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="location">Location</label>
+                            <select id="location" name="location" class="form-control">
+                                <option value="">All Locations</option>
+                                <?php foreach ($locations as $loc): ?>
+                                    <option value="<?php echo safeHtmlSpecialChars($loc); ?>" <?php echo $location === $loc ? 'selected' : ''; ?>>
+                                        <?php echo safeHtmlSpecialChars($loc); ?>
+                                    </option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        <?php endif; ?>
-                        
                         <div class="form-group">
-                            <label class="form-label">&nbsp;</label>
-                            <button type="submit" class="btn btn-primary w-100">
-                                <i class="fas fa-filter me-2"></i> Apply Filters
-                            </button>
-                        </div>
-                    </form>
-                </div>
-                
-                <!-- Charts -->
-                <div class="charts-grid">
-                    <?php if ($reportType === 'inventory'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-pie me-2"></i>Equipment by Type</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="equipmentByTypeChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-bar me-2"></i>Equipment Status Distribution</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="statusDistributionChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <?php elseif ($reportType === 'maintenance'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-line me-2"></i>Maintenance Trends (6 Months)</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="maintenanceTrendChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-pie me-2"></i>Maintenance Status Distribution</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="maintenanceStatusChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <?php elseif ($reportType === 'usage'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-bar me-2"></i>Equipment Usage by Type</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="usageByTypeChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-line me-2"></i>Usage Trends</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="usageTrendChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <?php elseif ($reportType === 'cost'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-pie me-2"></i>Cost Distribution by Type</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="costDistributionChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-line me-2"></i>Maintenance Cost Trends</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="costTrendChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <?php elseif ($reportType === 'performance'): ?>
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-bar me-2"></i>Equipment Performance</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="performanceChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <span><i class="fas fa-chart-line me-2"></i>Maintenance vs Usage</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="chart-container">
-                                <canvas id="maintenanceVsUsageChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-                </div>
-                
-                <!-- Report Data -->
-                <div class="card">
-                    <div class="card-header">
-                        <span>
-                            <i class="fas fa-table me-2"></i>
-                            <?php 
-                            switch ($reportType) {
-                                case 'inventory':
-                                    echo 'Equipment Inventory Report';
-                                    break;
-                                case 'maintenance':
-                                    echo 'Maintenance History Report';
-                                    break;
-                                case 'usage':
-                                    echo 'Equipment Usage Report';
-                                    break;
-                                case 'cost':
-                                    echo 'Cost Analysis Report';
-                                    break;
-                                case 'performance':
-                                    echo 'Equipment Performance Report';
-                                    break;
-                            }
-                            ?>
-                        </span>
-                        <div class="export-buttons">
-                            <a href="?type=<?php echo $reportType; ?>&start_date=<?php echo $startDate; ?>&end_date=<?php echo $endDate; ?>&equipment_type=<?php echo $equipmentType; ?>&status=<?php echo $status; ?>&export=excel" class="export-btn export-btn-excel">
-                                <i class="fas fa-file-excel"></i> Excel
-                            </a>
-                            <a href="?type=<?php echo $reportType; ?>&start_date=<?php echo $startDate; ?>&end_date=<?php echo $endDate; ?>&equipment_type=<?php echo $equipmentType; ?>&status=<?php echo $status; ?>&export=pdf" class="export-btn export-btn-pdf">
-                                <i class="fas fa-file-pdf"></i> PDF
-                            </a>
-                            <a href="?type=<?php echo $reportType; ?>&start_date=<?php echo $startDate; ?>&end_date=<?php echo $endDate; ?>&equipment_type=<?php echo $equipmentType; ?>&status=<?php echo $status; ?>&export=csv" class="export-btn export-btn-csv">
-                                <i class="fas fa-file-csv"></i> CSV
-                            </a>
-                            <button onclick="window.print()" class="export-btn export-btn-print">
-                                <i class="fas fa-print"></i> Print
+                            <label>&nbsp;</label>
+                            <button type="submit" class="btn">
+                                <i class="fas fa-filter"></i> Apply Filters
                             </button>
                         </div>
                     </div>
-                    <div class="card-body">
-                        <div class="table-responsive custom-scrollbar">
-                            <?php if ($reportType === 'inventory'): ?>
-                            <table class="table table-hover table-striped">
-                                <thead>
+                </form>
+            </div>
+        </div>
+        
+        <!-- Charts Section -->
+        <div class="charts-grid animate__animated animate__fadeInUp" style="animation-delay: 0.8s;">
+            <?php if ($reportType === 'overview' || $reportType === 'inventory'): ?>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-pie"></i> Equipment by Type</h3>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="equipmentTypeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-doughnut"></i> Status Distribution</h3>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="statusChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+            
+            <?php if ($reportType === 'maintenance' || $reportType === 'overview'): ?>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-line"></i> Maintenance Trends</h3>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="maintenanceTrendChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+            
+            <?php if ($reportType === 'usage' || $reportType === 'overview'): ?>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-area"></i> Usage Analytics</h3>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="usageChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+            
+            <?php if ($reportType === 'cost' || $reportType === 'overview'): ?>
+            <div class="card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-bar"></i> Cost Analysis</h3>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="costChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
+        </div>
+        
+        <!-- Report Data Table -->
+        <div class="card animate__animated animate__fadeInUp" style="animation-delay: 0.9s;">
+            <div class="card-header">
+                <h3>
+                    <i class="fas fa-table"></i>
+                    <?php 
+                    switch ($reportType) {
+                        case 'overview':
+                            echo 'Equipment Overview Report';
+                            break;
+                        case 'inventory':
+                            echo 'Inventory Report';
+                            break;
+                        case 'maintenance':
+                            echo 'Maintenance Report';
+                            break;
+                        case 'usage':
+                            echo 'Usage Analytics Report';
+                            break;
+                        case 'cost':
+                            echo 'Cost Analysis Report';
+                            break;
+                        case 'performance':
+                            echo 'Performance Report';
+                            break;
+                    }
+                    ?>
+                </h3>
+                <div class="export-buttons">
+                    <a href="?type=<?php echo $reportType; ?>&start_date=<?php echo $startDate; ?>&end_date=<?php echo $endDate; ?>&equipment_type=<?php echo $equipmentType; ?>&status=<?php echo $status; ?>&location=<?php echo $location; ?>&export=excel" class="export-btn export-excel">
+                        <i class="fas fa-file-excel"></i> Excel
+                    </a>
+                    <a href="?type=<?php echo $reportType; ?>&start_date=<?php echo $startDate; ?>&end_date=<?php echo $endDate; ?>&equipment_type=<?php echo $equipmentType; ?>&status=<?php echo $status; ?>&location=<?php echo $location; ?>&export=pdf" class="export-btn export-pdf">
+                        <i class="fas fa-file-pdf"></i> PDF
+                    </a>
+                    <a href="?type=<?php echo $reportType; ?>&start_date=<?php echo $startDate; ?>&end_date=<?php echo $endDate; ?>&equipment_type=<?php echo $equipmentType; ?>&status=<?php echo $status; ?>&location=<?php echo $location; ?>&export=csv" class="export-btn export-csv">
+                        <i class="fas fa-file-csv"></i> CSV
+                    </a>
+                    <button onclick="printReport()" class="export-btn export-print">
+                        <i class="fas fa-print"></i> Print
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <?php if ($reportType === 'overview'): ?>
+                                    <th>ID</th>
+                                    <th>Equipment Name</th>
+                                    <th>Type</th>
+                                    <th>Status</th>
+                                    <th>Location</th>
+                                    <th>Condition</th>
+                                    <th>Usage Hours</th>
+                                    <th>Maintenance Count</th>
+                                    <th>Usage Sessions</th>
+                                    <th>Total Cost</th>
+                                <?php elseif ($reportType === 'inventory'): ?>
+                                    <th>ID</th>
+                                    <th>Equipment Name</th>
+                                    <th>Type</th>
+                                    <th>Status</th>
+                                    <th>Location</th>
+                                    <th>Purchase Date</th>
+                                    <th>Cost</th>
+                                    <th>Condition</th>
+                                    <th>Last Maintenance</th>
+                                    <th>Pending Maintenance</th>
+                                <?php elseif ($reportType === 'maintenance'): ?>
+                                    <th>ID</th>
+                                    <th>Equipment</th>
+                                    <th>Type</th>
+                                    <th>Maintenance Type</th>
+                                    <th>Scheduled Date</th>
+                                    <th>Status</th>
+                                    <th>Priority</th>
+                                    <th>Technician</th>
+                                    <th>Cost</th>
+                                    <th>Duration</th>
+                                <?php elseif ($reportType === 'usage'): ?>
+                                    <th>ID</th>
+                                    <th>Equipment</th>
+                                    <th>Type</th>
+                                    <th>User</th>
+                                    <th>Start Time</th>
+                                    <th>Duration (min)</th>
+                                    <th>Usage Type</th>
+                                    <th>Intensity</th>
+                                    <th>Calories</th>
+                                    <th>Rating</th>
+                                <?php elseif ($reportType === 'cost'): ?>
+                                    <th>ID</th>
+                                    <th>Equipment</th>
+                                    <th>Type</th>
+                                    <th>Purchase Date</th>
+                                    <th>Purchase Cost</th>
+                                    <th>Maintenance Cost</th>
+                                    <th>Maintenance Count</th>
+                                    <th>Total Cost</th>
+                                    <th>Cost per Use</th>
+                                <?php elseif ($reportType === 'performance'): ?>
+                                    <th>ID</th>
+                                    <th>Equipment</th>
+                                    <th>Type</th>
+                                    <th>Condition Rating</th>
+                                    <th>Usage Count</th>
+                                    <th>Total Duration</th>
+                                    <th>Maintenance Count</th>
+                                    <th>Avg Rating</th>
+                                    <th>Performance Score</th>
+                                <?php endif; ?>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($reportData)): ?>
+                                <tr>
+                                    <td colspan="10" class="text-center" style="padding: 40px;">
+                                        <i class="fas fa-search fa-3x" style="color: #ccc; margin-bottom: 15px;"></i>
+                                        <h4>No data found</h4>
+                                        <p>Try adjusting your filters or date range.</p>
+                                    </td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($reportData as $item): ?>
                                     <tr>
-                                        <th>ID</th>
-                                        <th>Name</th>
-                                        <th>Type</th>
-                                        <th>Status</th>
-                                        <th>Purchase Date</th>
-                                        <th>Purchase Cost</th>
-                                        <th>Last Maintenance</th>
-                                        <th>Pending Maintenance</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($reportData)): ?>
-                                    <tr>
-                                        <td colspan="8" class="text-center">No equipment records found</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($reportData as $item): ?>
-                                        <tr>
+                                        <?php if ($reportType === 'overview'): ?>
                                             <td><?php echo $item['id']; ?></td>
-                                            <td><?php echo htmlspecialchars($item['name']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['type']); ?></td>
-                                            <td>
-                                                <?php 
-                                                $statusClass = '';
-                                                switch (strtolower($item['status'])) {
-                                                    case 'available':
-                                                        $statusClass = 'badge-success';
-                                                        break;
-                                                    case 'in_use':
-                                                        $statusClass = 'badge-info';
-                                                        break;
-                                                    case 'maintenance':
-                                                        $statusClass = 'badge-warning';
-                                                        break;
-                                                    case 'retired':
-                                                        $statusClass = 'badge-danger';
-                                                        break;
-                                                }
-                                                ?>
-                                                <span class="badge <?php echo $statusClass; ?>"><?php echo ucfirst($item['status']); ?></span>
-                                            </td>
-                                            <td><?php echo !empty($item['purchase_date']) ? date('M d, Y', strtotime($item['purchase_date'])) : 'N/A'; ?></td>
-                                            <td>$<?php echo !empty($item['purchase_cost']) ? number_format($item['purchase_cost'], 2) : '0.00'; ?></td>
-                                            <td><?php echo !empty($item['last_maintenance']) ? date('M d, Y', strtotime($item['last_maintenance'])) : 'Never'; ?></td>
-                                            <td>
-                                                <?php if (!empty($item['pending_maintenance']) && $item['pending_maintenance'] > 0): ?>
-                                                <span class="badge badge-warning"><?php echo $item['pending_maintenance']; ?> pending</span>
-                                                <?php else: ?>
-                                                <span class="badge badge-success">None</span>
-                                                <?php endif; ?>
-                                            </td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                            
-                            <?php elseif ($reportType === 'maintenance'): ?>
-                            <table class="table table-hover table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>ID</th>
-                                        <th>Equipment</th>
-                                        <th>Type</th>
-                                        <th>Date</th>
-                                        <th>Description</th>
-                                        <th>Technician</th>
-                                        <th>Status</th>
-                                        <th>Cost</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($reportData)): ?>
-                                    <tr>
-                                        <td colspan="8" class="text-center">No maintenance records found</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($reportData as $item): ?>
-                                        <tr>
-                                            <td><?php echo $item['id']; ?></td>
-                                            <td><?php echo htmlspecialchars($item['equipment_name']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['equipment_type']); ?></td>
-                                            <td><?php echo date('M d, Y', strtotime($item['maintenance_date'])); ?></td>
-                                            <td><?php echo htmlspecialchars($item['description']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['technician'] ?? 'N/A'); ?></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['name']); ?></td>
+                                            <td><span class="badge badge-info"><?php echo safeHtmlSpecialChars($item['type']); ?></span></td>
                                             <td>
                                                 <?php 
                                                 $statusClass = '';
                                                 switch ($item['status']) {
-                                                    case 'pending':
-                                                        $statusClass = 'badge-warning';
-                                                        break;
-                                                    case 'in_progress':
-                                                        $statusClass = 'badge-info';
-                                                        break;
-                                                    case 'completed':
-                                                        $statusClass = 'badge-success';
-                                                        break;
-                                                    case 'cancelled':
-                                                        $statusClass = 'badge-danger';
-                                                        break;
+                                                    case 'Available': $statusClass = 'badge-success'; break;
+                                                    case 'In Use': $statusClass = 'badge-info'; break;
+                                                    case 'Maintenance': $statusClass = 'badge-warning'; break;
+                                                    case 'Out of Order': $statusClass = 'badge-danger'; break;
+                                                    case 'Retired': $statusClass = 'badge-secondary'; break;
                                                 }
                                                 ?>
-                                                <span class="badge <?php echo $statusClass; ?>"><?php echo ucfirst($item['status']); ?></span>
+                                                <span class="badge <?php echo $statusClass; ?>"><?php echo $item['status']; ?></span>
                                             </td>
-                                            <td>$<?php echo !empty($item['cost']) ? number_format($item['cost'], 2) : '0.00'; ?></td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                            
-                            <?php elseif ($reportType === 'usage'): ?>
-                            <table class="table table-hover table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>ID</th>
-                                        <th>Equipment</th>
-                                        <th>Type</th>
-                                        <th>User</th>
-                                        <th>Date</th>
-                                        <th>Duration (min)</th>
-                                        <th>Notes</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($reportData)): ?>
-                                    <tr>
-                                        <td colspan="7" class="text-center">No usage records found</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($reportData as $item): ?>
-                                        <tr>
+                                            <td><?php echo safeHtmlSpecialChars($item['location'] ?? 'N/A'); ?></td>
+                                            <td>
+                                                <div class="progress-ring">
+                                                    <svg>
+                                                        <circle class="background" cx="30" cy="30" r="25"></circle>
+                                                        <circle class="progress" cx="30" cy="30" r="25" style="stroke-dashoffset: <?php echo 157 - (157 * (($item['condition_rating'] ?? 0) / 10)); ?>;"></circle>
+                                                    </svg>
+                                                </div>
+                                                <small><?php echo $item['condition_rating'] ?? 0; ?>/10</small>
+                                            </td>
+                                            <td><?php echo safeNumberFormat($item['usage_hours']); ?> hrs</td>
+                                            <td><?php echo safeNumberFormat($item['maintenance_count']); ?></td>
+                                            <td><?php echo safeNumberFormat($item['usage_sessions']); ?></td>
+                                            <td>$<?php echo safeNumberFormat(($item['cost'] ?? 0) + ($item['maintenance_cost'] ?? 0), 2); ?></td>
+                                        <?php elseif ($reportType === 'inventory'): ?>
                                             <td><?php echo $item['id']; ?></td>
-                                            <td><?php echo htmlspecialchars($item['equipment_name']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['equipment_type']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['user_name'] ?? 'N/A'); ?></td>
-                                            <td><?php echo date('M d, Y H:i', strtotime($item['usage_date'])); ?></td>
-                                            <td><?php echo $item['duration'] ?? 'N/A'; ?></td>
-                                            <td><?php echo htmlspecialchars($item['notes'] ?? 'N/A'); ?></td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                            
-                            <?php elseif ($reportType === 'cost'): ?>
-                            <table class="table table-hover table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>ID</th>
-                                        <th>Equipment</th>
-                                        <th>Type</th>
-                                        <th>Purchase Date</th>
-                                        <th>Purchase Cost</th>
-                                        <th>Maintenance Cost</th>
-                                        <th>Maintenance Count</th>
-                                        <th>Total Cost</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($reportData)): ?>
-                                    <tr>
-                                        <td colspan="8" class="text-center">No cost data found</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($reportData as $item): ?>
-                                        <tr>
-                                            <td><?php echo $item['id']; ?></td>
-                                            <td><?php echo htmlspecialchars($item['name']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['type']); ?></td>
-                                            <td><?php echo !empty($item['purchase_date']) ? date('M d, Y', strtotime($item['purchase_date'])) : 'N/A'; ?></td>
-                                            <td>$<?php echo !empty($item['purchase_cost']) ? number_format($item['purchase_cost'], 2) : '0.00'; ?></td>
-                                            <td>$<?php echo !empty($item['maintenance_cost']) ? number_format($item['maintenance_cost'], 2) : '0.00'; ?></td>
-                                            <td><?php echo $item['maintenance_count'] ?? 0; ?></td>
-                                            <td>$<?php echo number_format(($item['purchase_cost'] ?? 0) + ($item['maintenance_cost'] ?? 0), 2); ?></td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                            
-                            <?php elseif ($reportType === 'performance'): ?>
-                            <table class="table table-hover table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>ID</th>
-                                        <th>Equipment</th>
-                                        <th>Type</th>
-                                        <th>Usage Count</th>
-                                        <th>Total Duration (min)</th>
-                                        <th>Maintenance Count</th>
-                                        <th>Performance Score</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($reportData)): ?>
-                                    <tr>
-                                        <td colspan="7" class="text-center">No performance data found</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($reportData as $item): ?>
-                                        <?php 
-                                        // Calculate performance score (example: usage count / (maintenance count + 1))
-                                        $usageCount = $item['usage_count'] ?? 0;
-                                        $maintenanceCount = $item['maintenance_count'] ?? 0;
-                                        $performanceScore = $maintenanceCount > 0 ? round($usageCount / ($maintenanceCount + 1), 2) : $usageCount;
-                                        
-                                        // Determine performance class
-                                        $performanceClass = '';
-                                        if ($performanceScore >= 5) {
-                                            $performanceClass = 'badge-success';
-                                        } elseif ($performanceScore >= 2) {
-                                            $performanceClass = 'badge-info';
-                                        } elseif ($performanceScore >= 1) {
-                                            $performanceClass = 'badge-warning';
-                                        } else {
-                                            $performanceClass = 'badge-danger';
-                                        }
-                                        ?>
-                                        <tr>
-                                            <td><?php echo $item['id']; ?></td>
-                                            <td><?php echo htmlspecialchars($item['name']); ?></td>
-                                            <td><?php echo htmlspecialchars($item['type']); ?></td>
-                                            <td><?php echo $usageCount; ?></td>
-                                            <td><?php echo $item['total_duration'] ?? 0; ?></td>
-                                            <td><?php echo $maintenanceCount; ?></td>
-                                            <td><span class="badge <?php echo $performanceClass; ?>"><?php echo $performanceScore; ?></span></td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Summary Section -->
-                <?php if ($reportType === 'maintenance' && !empty($maintenanceCostSummary)): ?>
-                <div class="summary-section">
-                    <h5 class="mb-3"><i class="fas fa-calculator me-2"></i>Maintenance Cost Summary</h5>
-                    <div class="row">
-                        <div class="col-md-3">
-                            <div class="card">
-                                <div class="card-body text-center">
-                                    <h6 class="text-muted">Total Cost</h6>
-                                    <h3 class="mb-0">$<?php echo number_format($maintenanceCostSummary['total_cost'] ?? 0, 2); ?></h3>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card">
-                                <div class="card-body text-center">
-                                    <h6 class="text-muted">Average Cost</h6>
-                                    <h3 class="mb-0">$<?php echo number_format($maintenanceCostSummary['avg_cost'] ?? 0, 2); ?></h3>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card">
-                                <div class="card-body text-center">
-                                    <h6 class="text-muted">Minimum Cost</h6>
-                                    <h3 class="mb-0">$<?php echo number_format($maintenanceCostSummary['min_cost'] ?? 0, 2); ?></h3>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="card">
-                                <div class="card-body text-center">
-                                    <h6 class="text-muted">Maximum Cost</h6>
-                                    <h3 class="mb-0">$<?php echo number_format($maintenanceCostSummary['max_cost'] ?? 0, 2); ?></h3>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <?php endif; ?>
-                
-                <!-- Top Equipment Section -->
-                <?php if ($reportType === 'usage' && !empty($topEquipment)): ?>
-                <div class="card">
-                    <div class="card-header">
-                        <span><i class="fas fa-trophy me-2"></i>Top Used Equipment</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-hover">
-                                <thead>
-                                    <tr>
-                                        <th>Equipment</th>
-                                        <th>Type</th>
-                                        <th>Usage Count</th>
-                                        <th>Total Duration (min)</th>
-                                        <th>Utilization</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach ($topEquipment as $equipment): ?>
-                                    <tr>
-                                        <td><?php echo htmlspecialchars($equipment['name']); ?></td>
-                                        <td><?php echo htmlspecialchars($equipment['type']); ?></td>
-                                        <td><?php echo $equipment['usage_count']; ?></td>
-                                        <td><?php echo $equipment['total_duration'] ?? 0; ?></td>
-                                        <td>
-                                            <div class="progress" style="height: 10px;">
+                                            <td><?php echo safeHtmlSpecialChars($item['name']); ?></td>
+                                            <td><span class="badge badge-info"><?php echo safeHtmlSpecialChars($item['type']); ?></span></td>
+                                            <td>
                                                 <?php 
-                                                $percentage = min(100, ($equipment['usage_count'] / 10) * 100);
+                                                $statusClass = '';
+                                                switch ($item['status']) {
+                                                    case 'Available': $statusClass = 'badge-success'; break;
+                                                    case 'In Use': $statusClass = 'badge-info'; break;
+                                                    case 'Maintenance': $statusClass = 'badge-warning'; break;
+                                                    case 'Out of Order': $statusClass = 'badge-danger'; break;
+                                                    case 'Retired': $statusClass = 'badge-secondary'; break;
+                                                }
                                                 ?>
-                                                <div class="progress-bar bg-warning" role="progressbar" style="width: <?php echo $percentage; ?>%" aria-valuenow="<?php echo $percentage; ?>" aria-valuemin="0" aria-valuemax="100"></div>
-                                            </div>
-                                        </td>
+                                                <span class="badge <?php echo $statusClass; ?>"><?php echo $item['status']; ?></span>
+                                            </td>
+                                            <td><?php echo safeHtmlSpecialChars($item['location'] ?? 'N/A'); ?></td>
+                                            <td><?php echo $item['purchase_date'] ? date('M d, Y', strtotime($item['purchase_date'])) : 'N/A'; ?></td>
+                                            <td>$<?php echo safeNumberFormat($item['cost'], 2); ?></td>
+                                            <td><?php echo safeNumberFormat($item['condition_rating']); ?>/10</td>
+                                            <td><?php echo $item['last_maintenance'] ? date('M d, Y', strtotime($item['last_maintenance'])) : 'Never'; ?></td>
+                                            <td>
+                                                <?php if (($item['pending_maintenance'] ?? 0) > 0): ?>
+                                                    <span class="badge badge-warning"><?php echo safeNumberFormat($item['pending_maintenance']); ?></span>
+                                                <?php else: ?>
+                                                    <span class="badge badge-success">None</span>
+                                                <?php endif; ?>
+                                            </td>
+                                        <?php elseif ($reportType === 'maintenance'): ?>
+                                            <td><?php echo $item['id']; ?></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['equipment_name']); ?></td>
+                                            <td><span class="badge badge-info"><?php echo safeHtmlSpecialChars($item['equipment_type']); ?></span></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['maintenance_type']); ?></td>
+                                            <td><?php echo date('M d, Y', strtotime($item['scheduled_date'])); ?></td>
+                                            <td>
+                                                <?php 
+                                                $statusClass = '';
+                                                switch ($item['status']) {
+                                                    case 'Scheduled': $statusClass = 'badge-info'; break;
+                                                    case 'In Progress': $statusClass = 'badge-warning'; break;
+                                                    case 'Completed': $statusClass = 'badge-success'; break;
+                                                    case 'Cancelled': $statusClass = 'badge-danger'; break;
+                                                    case 'Overdue': $statusClass = 'badge-danger'; break;
+                                                }
+                                                ?>
+                                                <span class="badge <?php echo $statusClass; ?>"><?php echo $item['status']; ?></span>
+                                            </td>
+                                            <td>
+                                                <?php 
+                                                $priorityClass = '';
+                                                switch ($item['priority']) {
+                                                    case 'Low': $priorityClass = 'badge-success'; break;
+                                                    case 'Medium': $priorityClass = 'badge-warning'; break;
+                                                    case 'High': $priorityClass = 'badge-danger'; break;
+                                                    case 'Critical': $priorityClass = 'badge-danger'; break;
+                                                }
+                                                ?>
+                                                <span class="badge <?php echo $priorityClass; ?>"><?php echo $item['priority']; ?></span>
+                                            </td>
+                                            <td><?php echo safeHtmlSpecialChars($item['technician_name'] ?? 'N/A'); ?></td>
+                                            <td>$<?php echo safeNumberFormat($item['cost'], 2); ?></td>
+                                            <td><?php echo $item['actual_duration'] ? safeNumberFormat($item['actual_duration']) . ' min' : 'N/A'; ?></td>
+                                        <?php elseif ($reportType === 'usage'): ?>
+                                            <td><?php echo $item['id']; ?></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['equipment_name']); ?></td>
+                                            <td><span class="badge badge-info"><?php echo safeHtmlSpecialChars($item['equipment_type']); ?></span></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['user_name']); ?></td>
+                                            <td><?php echo date('M d, Y H:i', strtotime($item['start_time'])); ?></td>
+                                            <td><?php echo safeNumberFormat($item['duration_minutes']); ?></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['usage_type']); ?></td>
+                                            <td>
+                                                <?php 
+                                                $intensityClass = '';
+                                                switch ($item['intensity_level']) {
+                                                    case 'Low': $intensityClass = 'badge-success'; break;
+                                                    case 'Medium': $intensityClass = 'badge-warning'; break;
+                                                    case 'High': $intensityClass = 'badge-danger'; break;
+                                                }
+                                                ?>
+                                                <span class="badge <?php echo $intensityClass; ?>"><?php echo $item['intensity_level']; ?></span>
+                                            </td>
+                                            <td><?php echo safeNumberFormat($item['calories_burned']); ?></td>
+                                            <td>
+                                                <?php if ($item['session_rating']): ?>
+                                                    <div style="color: #ffc107;">
+                                                        <?php for ($i = 1; $i <= 5; $i++): ?>
+                                                            <i class="fas fa-star <?php echo $i <= $item['session_rating'] ? '' : 'text-muted'; ?>"></i>
+                                                        <?php endfor; ?>
+                                                    </div>
+                                                <?php else: ?>
+                                                    N/A
+                                                <?php endif; ?>
+                                            </td>
+                                        <?php elseif ($reportType === 'cost'): ?>
+                                            <td><?php echo $item['id']; ?></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['name']); ?></td>
+                                            <td><span class="badge badge-info"><?php echo safeHtmlSpecialChars($item['type']); ?></span></td>
+                                            <td><?php echo $item['purchase_date'] ? date('M d, Y', strtotime($item['purchase_date'])) : 'N/A'; ?></td>
+                                            <td>$<?php echo safeNumberFormat($item['purchase_cost'], 2); ?></td>
+                                            <td>$<?php echo safeNumberFormat($item['maintenance_cost'], 2); ?></td>
+                                            <td><?php echo safeNumberFormat($item['maintenance_count']); ?></td>
+                                            <td>$<?php echo safeNumberFormat(($item['purchase_cost'] ?? 0) + ($item['maintenance_cost'] ?? 0), 2); ?></td>
+                                            <td>
+                                                <?php 
+                                                $totalCost = ($item['purchase_cost'] ?? 0) + ($item['maintenance_cost'] ?? 0);
+                                                $usageCount = $item['usage_sessions'] ?? 1;
+                                                $costPerUse = $usageCount > 0 ? $totalCost / $usageCount : $totalCost;
+                                                ?>
+                                                $<?php echo safeNumberFormat($costPerUse, 2); ?>
+                                            </td>
+                                        <?php elseif ($reportType === 'performance'): ?>
+                                            <td><?php echo $item['id']; ?></td>
+                                            <td><?php echo safeHtmlSpecialChars($item['name']); ?></td>
+                                            <td><span class="badge badge-info"><?php echo safeHtmlSpecialChars($item['type']); ?></span></td>
+                                            <td>
+                                                <div class="progress-ring">
+                                                    <svg>
+                                                        <circle class="background" cx="30" cy="30" r="25"></circle>
+                                                        <circle class="progress" cx="30" cy="30" r="25" style="stroke-dashoffset: <?php echo 157 - (157 * (($item['condition_rating'] ?? 0) / 10)); ?>;"></circle>
+                                                    </svg>
+                                                </div>
+                                                <small><?php echo safeNumberFormat($item['condition_rating']); ?>/10</small>
+                                            </td>
+                                            <td><?php echo safeNumberFormat($item['usage_count']); ?></td>
+                                            <td><?php echo safeNumberFormat($item['total_duration']); ?> min</td>
+                                            <td><?php echo safeNumberFormat($item['maintenance_count']); ?></td>
+                                            <td>
+                                                <?php if ($item['avg_rating']): ?>
+                                                    <div style="color: #ffc107;">
+                                                        <?php for ($i = 1; $i <= 5; $i++): ?>
+                                                            <i class="fas fa-star <?php echo $i <= round($item['avg_rating']) ? '' : 'text-muted'; ?>"></i>
+                                                        <?php endfor; ?>
+                                                    </div>
+                                                    <small><?php echo safeNumberFormat($item['avg_rating'], 1); ?></small>
+                                                <?php else: ?>
+                                                    N/A
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <?php 
+                                                $usageCount = $item['usage_count'] ?? 0;
+                                                $maintenanceCount = $item['maintenance_count'] ?? 0;
+                                                $conditionRating = $item['condition_rating'] ?? 5;
+                                                $performanceScore = $maintenanceCount > 0 ? 
+                                                    round(($usageCount * $conditionRating) / ($maintenanceCount * 10), 2) : 
+                                                    round($usageCount * $conditionRating / 10, 2);
+                                                
+                                                $scoreClass = '';
+                                                if ($performanceScore >= 8) $scoreClass = 'badge-success';
+                                                elseif ($performanceScore >= 5) $scoreClass = 'badge-warning';
+                                                else $scoreClass = 'badge-danger';
+                                                ?>
+                                                <span class="badge <?php echo $scoreClass; ?>"><?php echo $performanceScore; ?></span>
+                                            </td>
+                                        <?php endif; ?>
                                     </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
                 </div>
-                <?php endif; ?>
-                
-                <!-- Maintenance Trends Section -->
-                <?php if ($reportType === 'maintenance' && !empty($maintenanceTrends)): ?>
-                <div class="card">
-                    <div class="card-header">
-                        <span><i class="fas fa-chart-line me-2"></i>Maintenance Trends (Last 6 Months)</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-hover">
-                                <thead>
-                                    <tr>
-                                        <th>Month</th>
-                                        <th>Total</th>
-                                        <th>Completed</th>
-                                        <th>Pending</th>
-                                        <th>In Progress</th>
-                                        <th>Cancelled</th>
-                                        <th>Avg. Cost</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach ($maintenanceTrends as $trend): ?>
-                                    <tr>
-                                        <td><?php echo date('M Y', strtotime($trend['month'] . '-01')); ?></td>
-                                        <td><?php echo $trend['total']; ?></td>
-                                        <td>
-                                            <span class="badge badge-success"><?php echo $trend['completed']; ?></span>
-                                        </td>
-                                        <td>
-                                            <span class="badge badge-warning"><?php echo $trend['pending']; ?></span>
-                                        </td>
-                                        <td>
-                                            <span class="badge badge-info"><?php echo $trend['in_progress']; ?></span>
-                                        </td>
-                                        <td>
-                                            <span class="badge badge-danger"><?php echo $trend['cancelled']; ?></span>
-                                        </td>
-                                        <td>$<?php echo number_format($trend['avg_cost'] ?? 0, 2); ?></td>
-                                    </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-                <?php endif; ?>
-                
-                <?php endif; ?>
             </div>
         </div>
+        
+        <!-- Additional Analytics Cards -->
+        <?php if ($reportType === 'overview'): ?>
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-chart-bar"></i> Maintenance Summary</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="stats-grid" style="grid-template-columns: 1fr;">
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, var(--warning), #f39c12);">
+                                    <i class="fas fa-tools"></i>
+                                </div>
+                                <h3><?php echo safeNumberFormat($maintenanceStats['total_maintenance']); ?></h3>
+                                <p>Total Maintenance</p>
+                            </div>
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, var(--success), #27ae60);">
+                                    <i class="fas fa-check"></i>
+                                </div>
+                                <h3><?php echo safeNumberFormat($maintenanceStats['completed']); ?></h3>
+                                <p>Completed</p>
+                            </div>
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, var(--danger), #e74c3c);">
+                                    <i class="fas fa-clock"></i>
+                                </div>
+                                <h3><?php echo safeNumberFormat($maintenanceStats['overdue']); ?></h3>
+                                <p>Overdue</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-chart-line"></i> Usage Summary</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="stats-grid" style="grid-template-columns: 1fr;">
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, var(--info), #3498db);">
+                                    <i class="fas fa-play"></i>
+                                </div>
+                                <h3><?php echo safeNumberFormat($usageStats['total_sessions']); ?></h3>
+                                <p>Total Sessions</p>
+                            </div>
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, #9b59b6, #8e44ad);">
+                                    <i class="fas fa-users"></i>
+                                </div>
+                                <h3><?php echo safeNumberFormat($usageStats['unique_users']); ?></h3>
+                                <p>Unique Users</p>
+                            </div>
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, #e67e22, #d35400);">
+                                    <i class="fas fa-fire"></i>
+                                </div>
+                                <h3><?php echo safeNumberFormat($usageStats['total_calories']); ?></h3>
+                                <p>Calories Burned</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h3><i class="fas fa-dollar-sign"></i> Cost Summary</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="stats-grid" style="grid-template-columns: 1fr;">
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, #2ecc71, #27ae60);">
+                                    <i class="fas fa-shopping-cart"></i>
+                                </div>
+                                <h3>$<?php echo safeNumberFormat($stats['total_value']); ?></h3>
+                                <p>Equipment Value</p>
+                            </div>
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, var(--warning), #f39c12);">
+                                    <i class="fas fa-wrench"></i>
+                                </div>
+                                <h3>$<?php echo safeNumberFormat($maintenanceStats['total_maintenance_cost']); ?></h3>
+                                <p>Maintenance Cost</p>
+                            </div>
+                            <div class="stat-card">
+                                <div class="icon" style="background: linear-gradient(45deg, var(--info), #3498db);">
+                                    <i class="fas fa-calculator"></i>
+                                </div>
+                                <h3>$<?php echo safeNumberFormat(($stats['total_value'] ?? 0) + ($maintenanceStats['total_maintenance_cost'] ?? 0)); ?></h3>
+                                <p>Total Investment</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
     </div>
+</div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
-    <script>
-        $(document).ready(function() {
-            // Theme toggle functionality
-            $('#theme-toggle').change(function() {
-                const theme = $(this).is(':checked') ? 'dark' : 'light';
-                
-                // Save theme preference via AJAX
-                $.ajax({
-                    url: 'save-theme.php',
-                    type: 'POST',
-                    data: { theme: theme },
-                    success: function(response) {
-                        if (response.success) {
-                            // Reload page to apply new theme
-                            location.reload();
-                        } else {
-                            console.error('Failed to save theme preference:', response.message);
-                        }
-                    },
-                    error: function(xhr, status, error) {
-                        console.error('AJAX error:', error);
-                    }
-                });
-            });
-            
-            // Mobile sidebar toggle
-            $('.navbar-toggler').click(function() {
-                $('.sidebar').toggleClass('collapsed');
-                $('.main-content').toggleClass('expanded');
-            });
-            
-            // Initialize charts based on report type
-            const reportType = '<?php echo $reportType; ?>';
-            const isDarkTheme = <?php echo $theme === 'dark' ? 'true' : 'false'; ?>;
-            
-            // Set Chart.js defaults based on theme
-            Chart.defaults.color = isDarkTheme ? '#f5f5f5' : '#333333';
-            Chart.defaults.borderColor = isDarkTheme ? '#444444' : '#dddddd';
-            
-            // Common chart colors
-            const chartColors = [
-                '#ff6600', '#2196f3', '#4caf50', '#ffc107', '#e91e63',
-                '#9c27b0', '#00bcd4', '#ff9800', '#795548', '#607d8b'
-            ];
-            
-            if (reportType === 'inventory') {
-                // Equipment by Type Chart
-                const typeCtx = document.getElementById('equipmentByTypeChart').getContext('2d');
-                new Chart(typeCtx, {
-                    type: 'pie',
-                    data: {
-                        labels: [
-                            <?php 
-                            if (!empty($chartData['equipmentByType'])) {
-                                foreach ($chartData['equipmentByType'] as $item) {
-                                    echo "'" . addslashes($item['type']) . "', ";
-                                }
-                            } else {
-                                echo "'No Data'";
-                            }
-                            ?>
+<!-- Floating Action Button -->
+<button class="floating-action-btn" onclick="refreshData()" title="Refresh Data">
+    <i class="fas fa-sync-alt"></i>
+</button>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    // Theme switching
+    function switchTheme(theme) {
+        // Update UI immediately
+        document.body.classList.toggle('dark-theme', theme === 'dark');
+        
+        // Update active labels
+        document.querySelectorAll('.theme-switch label').forEach(label => {
+            label.classList.remove('active');
+        });
+        event.target.classList.add('active');
+        
+        // Save theme preference via AJAX
+        $.ajax({
+            url: 'save-theme.php',
+            type: 'POST',
+            data: { theme: theme },
+            dataType: 'json',
+            success: function(response) {
+                if (!response.success) {
+                    console.error('Failed to save theme preference');
+                }
+            },
+            error: function() {
+                console.error('Error saving theme preference');
+            }
+        });
+    }
+    
+    // Chart initialization
+    $(document).ready(function() {
+        const isDarkTheme = document.body.classList.contains('dark-theme');
+        
+        // Set Chart.js defaults
+        Chart.defaults.color = isDarkTheme ? '#ffffff' : '#333333';
+        Chart.defaults.borderColor = isDarkTheme ? '#444444' : '#dddddd';
+        
+        const chartColors = [
+            '#ff6600', '#e55a00', '#ff8533', '#cc5200', '#ff9966',
+            '#b34700', '#ffb399', '#994000', '#ffccb3', '#802d00'
+        ];
+        
+        // Equipment by Type Chart
+        <?php if (!empty($chartData['equipmentByType'])): ?>
+        const typeCtx = document.getElementById('equipmentTypeChart');
+        if (typeCtx) {
+            new Chart(typeCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: [
+                        <?php foreach ($chartData['equipmentByType'] as $item): ?>
+                            '<?php echo addslashes($item['type']); ?>',
+                        <?php endforeach; ?>
+                    ],
+                    datasets: [{
+                        data: [
+                            <?php foreach ($chartData['equipmentByType'] as $item): ?>
+                                <?php echo $item['count']; ?>,
+                            <?php endforeach; ?>
                         ],
-                        datasets: [{
-                            data: [
-                                <?php 
-                                if (!empty($chartData['equipmentByType'])) {
-                                    foreach ($chartData['equipmentByType'] as $item) {
-                                        echo $item['count'] . ", ";
-                                    }
-                                } else {
-                                    echo "1";
-                                }
-                                ?>
-                            ],
-                            backgroundColor: chartColors,
-                            borderWidth: 1
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            legend: {
-                                position: 'right',
-                            },
-                            tooltip: {
-                                callbacks: {
-                                    label: function(context) {
-                                        const label = context.label || '';
-                                        const value = context.raw || 0;
-                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                                        const percentage = Math.round((value / total) * 100);
-                                        return `${label}: ${value} (${percentage}%)`;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-                
-                // Status Distribution Chart
-                const statusCtx = document.getElementById('statusDistributionChart').getContext('2d');
-                new Chart(statusCtx, {
-                    type: 'bar',
-                    data: {
-                        labels: ['Available', 'In Use', 'Maintenance', 'Retired'],
-                        datasets: [{
-                            label: 'Equipment Count',
-                            data: [
-                                <?php echo $availableEquipment; ?>,
-                                <?php echo $inUseEquipment; ?>,
-                                <?php echo $maintenanceEquipment; ?>,
-                                <?php echo $retiredEquipment; ?>
-                            ],
-                            backgroundColor: [
-                                '#4caf50', // Available
-                                '#2196f3', // In Use
-                                '#ffc107', // Maintenance
-                                '#f44336'  // Retired
-                            ],
-                            borderWidth: 1
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    precision: 0
-                                }
+                        backgroundColor: chartColors,
+                        borderWidth: 2,
+                        borderColor: isDarkTheme ? '#2d2d2d' : '#ffffff'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                usePointStyle: true,
+                                padding: 20
                             }
                         },
-                        plugins: {
-                            legend: {
-                                display: false
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.label || '';
+                                    const value = context.raw || 0;
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const percentage = Math.round((value / total) * 100);
+                                    return `${label}: ${value} (${percentage}%)`;
+                                }
                             }
                         }
                     }
-                });
-            } else if (reportType === 'maintenance') {
-                // Maintenance Trend Chart
-                const trendCtx = document.getElementById('maintenanceTrendChart').getContext('2d');
-                new Chart(trendCtx, {
-                    type: 'line',
-                    data: {
-                        labels: [
-                            <?php 
-                            if (!empty($chartData['maintenanceByMonth'])) {
-                                foreach ($chartData['maintenanceByMonth'] as $item) {
-                                    echo "'" . date('M Y', strtotime($item['month'] . '-01')) . "', ";
-                                }
-                            } else {
-                                // Generate last 6 months if no data
-                                for ($i = 5; $i >= 0; $i--) {
-                                    echo "'" . date('M Y', strtotime("-$i months")) . "', ";
-                                }
-                            }
-                            ?>
+                }
+            });
+        }
+        <?php endif; ?>
+        
+        // Status Distribution Chart
+        const statusCtx = document.getElementById('statusChart');
+        if (statusCtx) {
+            new Chart(statusCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['Available', 'In Use', 'Maintenance', 'Out of Order', 'Retired'],
+                    datasets: [{
+                        label: 'Equipment Count',
+                        data: [
+                            <?php echo $stats['available'] ?? 0; ?>,
+                            <?php echo $stats['in_use'] ?? 0; ?>,
+                            <?php echo $stats['maintenance'] ?? 0; ?>,
+                            <?php echo $stats['out_of_order'] ?? 0; ?>,
+                            <?php echo $stats['retired'] ?? 0; ?>
                         ],
-                        datasets: [{
-                            label: 'Maintenance Count',
-                            data: [
-                                <?php 
-                                if (!empty($chartData['maintenanceByMonth'])) {
-                                    foreach ($chartData['maintenanceByMonth'] as $item) {
-                                        echo $item['count'] . ", ";
-                                    }
-                                } else {
-                                    // Zero values if no data
-                                    echo "0, 0, 0, 0, 0, 0";
-                                }
-                                ?>
-                            ],
-                            borderColor: '#ff6600',
-                            backgroundColor: 'rgba(255, 102, 0, 0.1)',
-                            borderWidth: 2,
-                            tension: 0.3,
-                            fill: true
-                        }]
+                        backgroundColor: [
+                            '#28a745', '#17a2b8', '#ffc107', '#dc3545', '#6c757d'
+                        ],
+                        borderWidth: 2,
+                        borderColor: isDarkTheme ? '#2d2d2d' : '#ffffff'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0
+                            }
+                        }
                     },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    precision: 0
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Maintenance Trend Chart
+        <?php if (!empty($chartData['maintenanceTrend'])): ?>
+        const maintenanceCtx = document.getElementById('maintenanceTrendChart');
+        if (maintenanceCtx) {
+            new Chart(maintenanceCtx, {
+                type: 'line',
+                data: {
+                    labels: [
+                        <?php foreach ($chartData['maintenanceTrend'] as $item): ?>
+                            '<?php echo date('M Y', strtotime($item['month'] . '-01')); ?>',
+                        <?php endforeach; ?>
+                    ],
+                    datasets: [{
+                        label: 'Maintenance Count',
+                        data: [
+                            <?php foreach ($chartData['maintenanceTrend'] as $item): ?>
+                                <?php echo $item['count']; ?>,
+                            <?php endforeach; ?>
+                        ],
+                        borderColor: '#ff6600',
+                        backgroundColor: 'rgba(255, 102, 0, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: true,
+                        pointBackgroundColor: '#ff6600',
+                        pointBorderColor: '#ffffff',
+                        pointBorderWidth: 2,
+                        pointRadius: 6
+                    }, {
+                        label: 'Cost ($)',
+                        data: [
+                            <?php foreach ($chartData['maintenanceTrend'] as $item): ?>
+                                <?php echo $item['total_cost'] ?? 0; ?>,
+                            <?php endforeach; ?>
+                        ],
+                        borderColor: '#e55a00',
+                        backgroundColor: 'rgba(229, 90, 0, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: false,
+                        pointBackgroundColor: '#e55a00',
+                        pointBorderColor: '#ffffff',
+                        pointBorderWidth: 2,
+                        pointRadius: 6,
+                        yAxisID: 'y1'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            beginAtZero: true,
+                            grid: {
+                                drawOnChartArea: false,
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return '$' + value;
                                 }
                             }
                         }
                     }
-                });
-                
-                // Maintenance Status Chart
-                const statusCtx = document.getElementById('maintenanceStatusChart').getContext('2d');
-                new Chart(statusCtx, {
-                    type: 'doughnut',
-                    data: {
-                        labels: ['Pending', 'In Progress', 'Completed', 'Cancelled'],
-                        datasets: [{
-                            data: [
-                                <?php 
-                                $pendingCount = 0;
-                                $inProgressCount = 0;
-                                $completedCount = 0;
-                                $cancelledCount = 0;
-                                
-                                if (!empty($reportData)) {
-                                    foreach ($reportData as $item) {
-                                        if ($item['status'] === 'pending') $pendingCount++;
-                                        else if ($item['status'] === 'in_progress') $inProgressCount++;
-                                        else if ($item['status'] === 'completed') $completedCount++;
-                                        else if ($item['status'] === 'cancelled') $cancelledCount++;
-                                    }
-                                }
-                                
-                                echo "$pendingCount, $inProgressCount, $completedCount, $cancelledCount";
-                                
-                                // If all zeros, add 1 to each for visualization
-                                if ($pendingCount === 0 && $inProgressCount === 0 && $completedCount === 0 && $cancelledCount === 0) {
-                                    echo ", 1, 1, 1, 1";
-                                }
-                                ?>
-                            ],
-                            backgroundColor: [
-                                '#ffc107', // Pending
-                                '#2196f3', // In Progress
-                                '#4caf50', // Completed
-                                '#f44336'  // Cancelled
-                            ],
-                            borderWidth: 1
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            legend: {
-                                position: 'right'
+                }
+            });
+        }
+        <?php endif; ?>
+        
+        // Usage Analytics Chart
+        <?php if (!empty($chartData['usageTrend'])): ?>
+        const usageCtx = document.getElementById('usageChart');
+        if (usageCtx) {
+            new Chart(usageCtx, {
+                type: 'line',
+                data: {
+                    labels: [
+                        <?php foreach ($chartData['usageTrend'] as $item): ?>
+                            '<?php echo date('M d', strtotime($item['date'])); ?>',
+                        <?php endforeach; ?>
+                    ],
+                    datasets: [{
+                        label: 'Sessions',
+                        data: [
+                            <?php foreach ($chartData['usageTrend'] as $item): ?>
+                                <?php echo $item['sessions']; ?>,
+                            <?php endforeach; ?>
+                        ],
+                        borderColor: '#ff6600',
+                        backgroundColor: 'rgba(255, 102, 0, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: true
+                    }, {
+                        label: 'Equipment Used',
+                        data: [
+                            <?php foreach ($chartData['usageTrend'] as $item): ?>
+                                <?php echo $item['equipment_used']; ?>,
+                            <?php endforeach; ?>
+                        ],
+                        borderColor: '#e55a00',
+                        backgroundColor: 'rgba(229, 90, 0, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0
                             }
                         }
                     }
-                });
-            }
-            
-            // Initialize other chart types as needed
+                }
+            });
+        }
+        <?php endif; ?>
+        
+        // Cost Analysis Chart
+        <?php if (!empty($chartData['costByType'])): ?>
+        const costCtx = document.getElementById('costChart');
+        if (costCtx) {
+            new Chart(costCtx, {
+                type: 'bar',
+                data: {
+                    labels: [
+                        <?php foreach ($chartData['costByType'] as $item): ?>
+                            '<?php echo addslashes($item['type']); ?>',
+                        <?php endforeach; ?>
+                    ],
+                    datasets: [{
+                        label: 'Purchase Cost',
+                        data: [
+                            <?php foreach ($chartData['costByType'] as $item): ?>
+                                <?php echo $item['purchase_cost'] ?? 0; ?>,
+                            <?php endforeach; ?>
+                        ],
+                        backgroundColor: '#ff6600',
+                        borderWidth: 2,
+                        borderColor: isDarkTheme ? '#2d2d2d' : '#ffffff'
+                    }, {
+                        label: 'Maintenance Cost',
+                        data: [
+                            <?php foreach ($chartData['costByType'] as $item): ?>
+                                <?php echo $item['maintenance_cost'] ?? 0; ?>,
+                            <?php endforeach; ?>
+                        ],
+                        backgroundColor: '#e55a00',
+                        borderWidth: 2,
+                        borderColor: isDarkTheme ? '#2d2d2d' : '#ffffff'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            stacked: true,
+                        },
+                        y: {
+                            stacked: true,
+                            beginAtZero: true,
+                            ticks: {
+                                callback: function(value) {
+                                    return '$' + value.toLocaleString();
+                                }
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': $' + context.raw.toLocaleString();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        <?php endif; ?>
+    });
+    
+    // Utility functions
+    function refreshData() {
+        const btn = document.querySelector('.floating-action-btn');
+        const icon = btn.querySelector('i');
+        
+        icon.classList.add('fa-spin');
+        
+        setTimeout(() => {
+            location.reload();
+        }, 1000);
+    }
+    
+    function printReport() {
+        window.print();
+    }
+    
+    // Auto-refresh every 5 minutes
+    setInterval(function() {
+        const now = new Date();
+        if (now.getMinutes() % 5 === 0 && now.getSeconds() === 0) {
+            refreshData();
+        }
+    }, 1000);
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Ctrl+R to refresh
+        if (e.ctrlKey && e.key === 'r') {
+            e.preventDefault();
+            refreshData();
+        }
+        
+        // Ctrl+P to print
+        if (e.ctrlKey && e.key === 'p') {
+            e.preventDefault();
+            printReport();
+        }
+    });
+    
+    // Auto-hide alerts after 5 seconds
+    setTimeout(function() {
+        const alerts = document.querySelectorAll('.alert');
+        alerts.forEach(alert => {
+            alert.style.opacity = '0';
+            alert.style.transform = 'translateY(-20px)';
+            setTimeout(() => alert.remove(), 300);
         });
-    </script>
+    }, 5000);
+</script>
 </body>
 </html>

@@ -1,151 +1,89 @@
 <?php
 // Include authentication middleware
 require_once __DIR__ . '/../auth_middleware.php';
-
-// Require Trainer role to access this page
 requireRole('Trainer');
 
-// Get user data
 $userId = $_SESSION['user_id'];
 $userName = $_SESSION['name'];
 
-// Connect to database
+require_once __DIR__ . '/../db_connect.php';
 $conn = connectDB();
 
-// Include theme preference helper
-require_once 'dashboard-theme-fix.php';
+require_once 'trainer-theme-helper.php';
 $theme = getThemePreference($conn, $userId);
 
-// Get all members assigned to this trainer
-$members = [];
-try {
-    // Check if trainer_members table exists
-    $tableExists = $conn->query("SHOW TABLES LIKE 'trainer_members'")->rowCount() > 0;
-
-    if ($tableExists) {
-        // Check if status column exists in trainer_members
-        $statusColumnExists = $conn->query("SHOW COLUMNS FROM trainer_members LIKE 'status'")->rowCount() > 0;
-        
-        $memberQuery = "
-            SELECT u.id, u.name, u.email, u.phone, u.profile_image, tm.joined_date
-            FROM trainer_members tm
-            JOIN users u ON tm.member_id = u.id
-            WHERE tm.trainer_id = ?
-        ";
-        
-        if ($statusColumnExists) {
-            $memberQuery .= " AND tm.status = 'active'";
-        }
-        
-        $memberQuery .= " ORDER BY u.name ASC";
-        
-        $memberStmt = $conn->prepare($memberQuery);
-        $memberStmt->execute([$userId]);
-        $members = $memberStmt->fetchAll(PDO::FETCH_ASSOC);
+// Add the missing formatDate function
+function formatDate($dateString) {
+    if (empty($dateString)) {
+        return 'N/A';
     }
-} catch (PDOException $e) {
-    // Handle error - empty members array already set
+    $date = new DateTime($dateString);
+    return $date->format('M j, Y');
 }
 
-// Handle form submissions
-$message = '';
-$messageType = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (isset($_POST['add_member'])) {
-        // Add new member
+// Handle member assignment
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    if ($_POST['action'] === 'assign_member') {
+        $memberId = $_POST['member_id'];
+        $specializationFocus = $_POST['specialization_focus'] ?? '';
+        $goals = $_POST['goals'] ?? '';
+        
         try {
-            $memberEmail = $_POST['email'];
+            $stmt = $conn->prepare("
+                INSERT INTO trainer_members (trainer_id, member_id, assigned_date, specialization_focus, goals) 
+                VALUES (?, ?, CURDATE(), ?, ?)
+                ON DUPLICATE KEY UPDATE 
+                specialization_focus = VALUES(specialization_focus),
+                goals = VALUES(goals),
+                status = 'active'
+            ");
+            $stmt->execute([$userId, $memberId, $specializationFocus, $goals]);
             
-            // Check if user exists
-            $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? AND role = 'Member'");
-            $stmt->execute([$memberEmail]);
-            $memberUser = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if ($memberUser) {
-                $memberId = $memberUser['id'];
-                
-                // Check if already assigned
-                $stmt = $conn->prepare("SELECT id FROM trainer_members WHERE trainer_id = ? AND member_id = ?");
-                $stmt->execute([$userId, $memberId]);
-                
-                if ($stmt->rowCount() === 0) {
-                    // Create trainer_members table if it doesn't exist
-                    if (!$tableExists) {
-                        $conn->exec("
-                            CREATE TABLE trainer_members (
-                                id INT AUTO_INCREMENT PRIMARY KEY,
-                                trainer_id INT NOT NULL,
-                                member_id INT NOT NULL,
-                                status VARCHAR(20) DEFAULT 'active',
-                                joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                notes TEXT,
-                                UNIQUE KEY (trainer_id, member_id)
-                            )
-                        ");
-                    }
-                    
-                    // Add member to trainer
-                    $stmt = $conn->prepare("
-                        INSERT INTO trainer_members (trainer_id, member_id, notes) 
-                        VALUES (?, ?, ?)
-                    ");
-                    $stmt->execute([$userId, $memberId, $_POST['notes'] ?? '']);
-                    
-                    $message = 'Member added successfully!';
-                    $messageType = 'success';
-                    
-                    // Redirect to prevent form resubmission
-                    header("Location: members.php?added=1");
-                    exit;
-                } else {
-                    $message = 'This member is already assigned to you.';
-                    $messageType = 'warning';
-                }
-            } else {
-                $message = 'No member found with that email address.';
-                $messageType = 'error';
-            }
-        } catch (PDOException $e) {
-            $message = 'Error adding member: ' . $e->getMessage();
-            $messageType = 'error';
-        }
-    } elseif (isset($_POST['remove_member'])) {
-        // Remove member
-        try {
-            $memberId = $_POST['member_id'];
-            
-            $stmt = $conn->prepare("DELETE FROM trainer_members WHERE trainer_id = ? AND member_id = ?");
+            // Log activity
+            $stmt = $conn->prepare("
+                INSERT INTO trainer_activity (trainer_id, member_id, activity_type, title, description) 
+                VALUES (?, ?, 'member', 'Member Assigned', 'New member assigned to training program')
+            ");
             $stmt->execute([$userId, $memberId]);
             
-            $message = 'Member removed successfully!';
-            $messageType = 'success';
-            
-            // Redirect to prevent form resubmission
-            header("Location: members.php?removed=1");
-            exit;
+            $success = "Member assigned successfully!";
         } catch (PDOException $e) {
-            $message = 'Error removing member: ' . $e->getMessage();
-            $messageType = 'error';
+            $error = "Error assigning member: " . $e->getMessage();
         }
     }
 }
 
-// Check for URL parameters
-if (isset($_GET['added']) && $_GET['added'] == '1') {
-    $message = 'Member added successfully!';
-    $messageType = 'success';
-}
+// Get trainer's members
+$stmt = $conn->prepare("
+    SELECT u.*, 
+           tm.created_at AS assigned_date,
+           tm.specialization_focus,
+           tm.goals,
+           tm.status as member_status,
+           (SELECT COUNT(*) FROM trainer_schedule WHERE member_id = u.id AND trainer_id = ? AND status = 'completed') as completed_sessions,
+           (SELECT COUNT(*) FROM workout_plans WHERE member_id = u.id AND trainer_id = ?) as workout_plans,
+           (SELECT COUNT(*) FROM nutrition_plans WHERE member_id = u.id AND trainer_id = ?) as nutrition_plans
+    FROM trainer_members tm
+    JOIN users u ON tm.member_id = u.id
+    WHERE tm.trainer_id = ?
+    ORDER BY tm.created_at DESC
+");
+$stmt->execute([$userId, $userId, $userId, $userId]);
+$members = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-if (isset($_GET['removed']) && $_GET['removed'] == '1') {
-    $message = 'Member removed successfully!';
-    $messageType = 'success';
-}
 
-// Format date for display
-function formatDate($date) {
-    return date('M j, Y', strtotime($date));
-}
+// Get available members (not assigned to this trainer)
+$stmt = $conn->prepare("
+    SELECT u.* 
+    FROM users u 
+    WHERE u.role = 'Member' 
+    AND u.id NOT IN (
+        SELECT member_id FROM trainer_members WHERE trainer_id = ? AND status = 'active'
+    )
+    ORDER BY u.name ASC
+");
+$stmt->execute([$userId]);
+$availableMembers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>
@@ -153,233 +91,477 @@ function formatDate($date) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Members - EliteFit Gym</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <title>My Members - EliteFit Gym</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="../assets/css/trainer-dashboard.css">
+    <style>
+        /* Include the same CSS variables and base styles from dashboard.php */
+        :root {
+            --primary: #ff6b35;
+            --primary-dark: #e55a2b;
+            --secondary: #2c3e50;
+            --success: #27ae60;
+            --warning: #f39c12;
+            --danger: #e74c3c;
+            --info: #3498db;
+            --bg-dark: #0a0a0a;
+            --card-dark: #1a1a1a;
+            --text-dark: #ecf0f1;
+            --border-dark: #333333;
+            --bg-light: #f8f9fa;
+            --card-light: #ffffff;
+            --text-light: #2c3e50;
+            --border-light: #dee2e6;
+        }
+
+        [data-theme="dark"] {
+            --bg: var(--bg-dark);
+            --card-bg: var(--card-dark);
+            --text: var(--text-dark);
+            --border: var(--border-dark);
+        }
+
+        [data-theme="light"] {
+            --bg: var(--bg-light);
+            --card-bg: var(--card-light);
+            --text: var(--text-light);
+            --border: var(--border-light);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            transition: all 0.3s ease;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 0.75rem;
+            text-decoration: none;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+        }
+
+        .members-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .member-card {
+            background: var(--card-bg);
+            border-radius: 1.5rem;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            transition: all 0.3s ease;
+        }
+
+        .member-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+        }
+
+        .member-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .member-avatar {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            overflow: hidden;
+            background: var(--primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 1.5rem;
+        }
+
+        .member-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .member-info h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .member-email {
+            color: var(--text);
+            opacity: 0.7;
+            font-size: 0.875rem;
+        }
+
+        .member-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 0.75rem;
+            background: rgba(255, 107, 53, 0.05);
+            border-radius: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: var(--text);
+            opacity: 0.7;
+        }
+
+        .member-details {
+            margin: 1rem 0;
+        }
+
+        .detail-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-item:last-child {
+            border-bottom: none;
+        }
+
+        .member-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: var(--primary);
+            border: 1px solid var(--primary);
+        }
+
+        .btn-outline:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+
+        .modal-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--card-bg);
+            border-radius: 1rem;
+            padding: 2rem;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .alert {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .alert-success {
+            background: rgba(39, 174, 96, 0.1);
+            color: var(--success);
+            border: 1px solid var(--success);
+        }
+
+        .alert-error {
+            background: rgba(231, 76, 60, 0.1);
+            color: var(--danger);
+            border: 1px solid var(--danger);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text);
+            opacity: 0.7;
+        }
+
+        .empty-state i {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            color: var(--primary);
+        }
+
+        .empty-state h3 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+        }
+
+        .status-badge.active {
+            background: rgba(39, 174, 96, 0.1);
+            color: var(--success);
+        }
+
+        .status-badge.inactive {
+            background: rgba(231, 76, 60, 0.1);
+            color: var(--danger);
+        }
+    </style>
 </head>
 <body>
-    <!-- Mobile Menu Toggle -->
-    <button class="mobile-menu-toggle" id="mobileMenuToggle">
-        <i class="fas fa-bars"></i>
-    </button>
-
-    <div class="dashboard-container">
-        <!-- Sidebar -->
-        <div class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <i class="fas fa-dumbbell fa-2x" style="color: var(--primary);"></i>
-                <h2>EliteFit Gym</h2>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>My Members</h1>
+                <p>Manage your assigned members and their training programs</p>
             </div>
-            
-            <div class="sidebar-section">
-                <div class="sidebar-section-title">Main</div>
-                <ul class="sidebar-menu">
-                    <li><a href="dashboard.php"><i class="fas fa-home"></i> <span>Dashboard</span></a></li>
-                    <li><a href="my-profile.php"><i class="fas fa-user"></i> <span>My Profile</span></a></li>
-                    <li><a href="members.php" class="active"><i class="fas fa-users"></i> <span>Members</span></a></li>
-                </ul>
-            </div>
-            
-            <div class="sidebar-section">
-                <div class="sidebar-section-title">Training</div>
-                <ul class="sidebar-menu">
-                    <li><a href="workout-plans.php"><i class="fas fa-dumbbell"></i> <span>Workout Plans</span></a></li>
-                    <li><a href="schedule.php"><i class="fas fa-calendar-alt"></i> <span>Schedule</span></a></li>
-                    <li><a href="progress-tracking.php"><i class="fas fa-chart-line"></i> <span>Progress Tracking</span></a></li>
-                </ul>
-            </div>
-            
-            <div class="sidebar-section">
-                <div class="sidebar-section-title">Account</div>
-                <ul class="sidebar-menu">
-                    <li><a href="settings.php"><i class="fas fa-cog"></i> <span>Settings</span></a></li>
-                    <li><a href="../logout.php"><i class="fas fa-sign-out-alt"></i> <span>Logout</span></a></li>
-                </ul>
-            </div>
+            <button class="btn" onclick="openAssignModal()">
+                <i class="fas fa-plus"></i> Assign Member
+            </button>
         </div>
 
-        <!-- Main Content -->
-        <div class="main-content">
-            <!-- Header -->
-            <div class="header">
-                <div>
-                    <h1>Members</h1>
-                    <p>Manage your assigned members</p>
+        <?php if (isset($success)): ?>
+            <div class="alert alert-success"><?php echo $success; ?></div>
+        <?php endif; ?>
+
+        <?php if (isset($error)): ?>
+            <div class="alert alert-error"><?php echo $error; ?></div>
+        <?php endif; ?>
+
+        <div class="members-grid">
+            <?php foreach ($members as $member): ?>
+                <div class="member-card">
+                    <div class="member-header">
+                        <div class="member-avatar">
+                            <?php if (!empty($member['profile_image'])): ?>
+                                <img src="<?php echo htmlspecialchars($member['profile_image']); ?>" alt="Profile">
+                            <?php else: ?>
+                                <?php echo strtoupper(substr($member['name'], 0, 1)); ?>
+                            <?php endif; ?>
+                        </div>
+                        <div class="member-info">
+                            <h3><?php echo htmlspecialchars($member['name']); ?></h3>
+                            <div class="member-email"><?php echo htmlspecialchars($member['email']); ?></div>
+                        </div>
+                    </div>
+
+                    <div class="member-stats">
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $member['completed_sessions']; ?></div>
+                            <div class="stat-label">Sessions</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $member['workout_plans']; ?></div>
+                            <div class="stat-label">Workouts</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value"><?php echo $member['nutrition_plans']; ?></div>
+                            <div class="stat-label">Nutrition</div>
+                        </div>
+                    </div>
+
+                    <div class="member-details">
+                        <div class="detail-item">
+                            <span>Assigned Date:</span>
+                            <span><?php echo formatDate($member['assigned_date']); ?></span>
+                        </div>
+                        <?php if (!empty($member['specialization_focus'])): ?>
+                            <div class="detail-item">
+                                <span>Focus:</span>
+                                <span><?php echo htmlspecialchars($member['specialization_focus']); ?></span>
+                            </div>
+                        <?php endif; ?>
+                        <div class="detail-item">
+                            <span>Status:</span>
+                            <span class="status-badge <?php echo $member['member_status']; ?>">
+                                <?php echo ucfirst($member['member_status']); ?>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="member-actions">
+                        <a href="member-details.php?id=<?php echo $member['id']; ?>" class="btn btn-sm">
+                            <i class="fas fa-eye"></i> View Details
+                        </a>
+                        <a href="workouts.php?member=<?php echo $member['id']; ?>" class="btn btn-sm btn-outline">
+                            <i class="fas fa-dumbbell"></i> Workouts
+                        </a>
+                        <a href="nutrition.php?member=<?php echo $member['id']; ?>" class="btn btn-sm btn-outline">
+                            <i class="fas fa-apple-alt"></i> Nutrition
+                        </a>
+                    </div>
                 </div>
-                <div class="header-actions">
-                    <button class="btn btn-primary" data-modal="addMemberModal">
-                        <i class="fas fa-plus"></i> Add Member
+            <?php endforeach; ?>
+        </div>
+
+        <?php if (empty($members)): ?>
+            <div class="empty-state">
+                <i class="fas fa-users"></i>
+                <h3>No members assigned yet</h3>
+                <p>Start by assigning members to your training program</p>
+                <button class="btn" onclick="openAssignModal()">
+                    <i class="fas fa-plus"></i> Assign Your First Member
+                </button>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- Assign Member Modal -->
+    <div id="assignModal" class="modal">
+        <div class="modal-content">
+            <h2>Assign New Member</h2>
+            <form method="POST">
+                <input type="hidden" name="action" value="assign_member">
+                
+                <div class="form-group">
+                    <label for="member_id">Select Member:</label>
+                    <select name="member_id" id="member_id" required>
+                        <option value="">Choose a member...</option>
+                        <?php foreach ($availableMembers as $member): ?>
+                            <option value="<?php echo $member['id']; ?>">
+                                <?php echo htmlspecialchars($member['name']); ?> (<?php echo htmlspecialchars($member['email']); ?>)
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="specialization_focus">Specialization Focus:</label>
+                    <input type="text" name="specialization_focus" id="specialization_focus" 
+                           placeholder="e.g., Weight Loss, Muscle Building, Cardio">
+                </div>
+
+                <div class="form-group">
+                    <label for="goals">Member Goals:</label>
+                    <textarea name="goals" id="goals" rows="3" 
+                              placeholder="Describe the member's fitness goals and objectives"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <button type="submit" class="btn">
+                        <i class="fas fa-plus"></i> Assign Member
+                    </button>
+                    <button type="button" class="btn btn-outline" onclick="closeAssignModal()">
+                        Cancel
                     </button>
                 </div>
-            </div>
-            
-            <?php if (!empty($message)): ?>
-                <div class="alert alert-<?php echo $messageType; ?>">
-                    <i class="fas fa-<?php echo $messageType === 'success' ? 'check-circle' : 'exclamation-circle'; ?>"></i>
-                    <div><?php echo $message; ?></div>
-                    <button type="button" class="close">&times;</button>
-                </div>
-            <?php endif; ?>
-            
-            <!-- Members List -->
-            <div class="card">
-                <div class="card-header">
-                    <h2><i class="fas fa-users"></i> Your Members</h2>
-                    <div class="card-actions">
-                        <div class="search-box">
-                            <input type="text" placeholder="Search members..." id="memberSearch">
-                            <i class="fas fa-search"></i>
-                        </div>
-                    </div>
-                </div>
-                <div class="card-content">
-                    <?php if (empty($members)): ?>
-                        <div class="empty-state">
-                            <i class="fas fa-users"></i>
-                            <p>No members assigned yet</p>
-                            <button class="btn btn-primary" data-modal="addMemberModal">Add Your First Member</button>
-                        </div>
-                    <?php else: ?>
-                        <div class="table-responsive">
-                            <table class="table" data-sortable id="membersTable">
-                                <thead>
-                                    <tr>
-                                        <th data-sortable>Name</th>
-                                        <th data-sortable>Email</th>
-                                        <th data-sortable>Phone</th>
-                                        <th data-sortable>Joined Date</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach ($members as $member): ?>
-                                        <tr>
-                                            <td>
-                                                <div class="member-info">
-                                                    <?php if (!empty($member['profile_image'])): ?>
-                                                        <img src="<?php echo htmlspecialchars($member['profile_image']); ?>" alt="Profile" class="member-avatar">
-                                                    <?php else: ?>
-                                                        <div class="member-avatar-placeholder">
-                                                            <?php echo strtoupper(substr($member['name'], 0, 1)); ?>
-                                                        </div>
-                                                    <?php endif; ?>
-                                                    <span><?php echo htmlspecialchars($member['name']); ?></span>
-                                                </div>
-                                            </td>
-                                            <td><?php echo htmlspecialchars($member['email']); ?></td>
-                                            <td><?php echo !empty($member['phone']) ? htmlspecialchars($member['phone']) : '-'; ?></td>
-                                            <td><?php echo isset($member['joined_date']) ? formatDate($member['joined_date']) : '-'; ?></td>
-                                            <td>
-                                                <div class="action-buttons">
-                                                    <a href="member-details.php?id=<?php echo $member['id']; ?>" class="btn btn-sm btn-outline" title="View Details">
-                                                        <i class="fas fa-eye"></i>
-                                                    </a>
-                                                    <a href="workout-plans.php?member_id=<?php echo $member['id']; ?>" class="btn btn-sm btn-outline" title="Workout Plans">
-                                                        <i class="fas fa-dumbbell"></i>
-                                                    </a>
-                                                    <a href="progress-tracking.php?member_id=<?php echo $member['id']; ?>" class="btn btn-sm btn-outline" title="Progress Tracking">
-                                                        <i class="fas fa-chart-line"></i>
-                                                    </a>
-                                                    <a href="schedule.php?member_id=<?php echo $member['id']; ?>" class="btn btn-sm btn-outline" title="Schedule">
-                                                        <i class="fas fa-calendar-alt"></i>
-                                                    </a>
-                                                    <button class="btn btn-sm btn-danger" onclick="confirmRemoveMember(<?php echo $member['id']; ?>, '<?php echo htmlspecialchars($member['name']); ?>')" title="Remove Member">
-                                                        <i class="fas fa-user-minus"></i>
-                                                    </button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    <?php endif; ?>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Add Member Modal -->
-    <div class="modal" id="addMemberModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Add New Member</h3>
-                <button class="close-modal">&times;</button>
-            </div>
-            <div class="modal-body">
-                <form action="members.php" method="post" data-validate>
-                    <input type="hidden" name="add_member" value="1">
-                    
-                    <div class="form-group">
-                        <label for="email">Member Email</label>
-                        <input type="email" id="email" name="email" class="form-control" required>
-                        <div class="form-text">Enter the email of an existing gym member to assign them to you.</div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="notes">Notes (Optional)</label>
-                        <textarea id="notes" name="notes" class="form-control" rows="3"></textarea>
-                    </div>
-                    
-                    <div class="form-actions">
-                        <button type="button" class="btn btn-outline close-modal">Cancel</button>
-                        <button type="submit" class="btn btn-primary">Add Member</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Remove Member Confirmation Modal -->
-    <div class="modal" id="removeMemberModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Confirm Remove Member</h3>
-                <button class="close-modal">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p>Are you sure you want to remove <span id="memberNameToRemove"></span> from your members list?</p>
-                <p>This will not delete the member's account, but they will no longer be assigned to you.</p>
-                
-                <form action="members.php" method="post">
-                    <input type="hidden" name="remove_member" value="1">
-                    <input type="hidden" id="memberIdToRemove" name="member_id" value="">
-                    
-                    <div class="form-actions">
-                        <button type="button" class="btn btn-outline close-modal">Cancel</button>
-                        <button type="submit" class="btn btn-danger">Remove Member</button>
-                    </div>
-                </form>
-            </div>
+            </form>
         </div>
     </div>
 
-    <script src="../assets/js/trainer-dashboard.js"></script>
     <script>
-        // Search functionality
-        document.getElementById('memberSearch').addEventListener('keyup', function() {
-            const searchValue = this.value.toLowerCase();
-            const table = document.getElementById('membersTable');
-            
-            if (table) {
-                const rows = table.querySelectorAll('tbody tr');
-                
-                rows.forEach(row => {
-                    const text = row.textContent.toLowerCase();
-                    row.style.display = text.includes(searchValue) ? '' : 'none';
-                });
-            }
-        });
-        
-        // Confirm remove member
-        function confirmRemoveMember(memberId, memberName) {
-            document.getElementById('memberIdToRemove').value = memberId;
-            document.getElementById('memberNameToRemove').textContent = memberName;
-            
-            const modal = document.getElementById('removeMemberModal');
-            if (modal) {
-                openModal(modal);
+        function openAssignModal() {
+            document.getElementById('assignModal').style.display = 'block';
+        }
+
+        function closeAssignModal() {
+            document.getElementById('assignModal').style.display = 'none';
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('assignModal');
+            if (event.target === modal) {
+                closeAssignModal();
             }
         }
     </script>

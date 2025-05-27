@@ -19,7 +19,11 @@ $theme = getThemePreference($conn, $userId);
 
 // Get all trainers
 $trainersQuery = "
-    SELECT u.id, u.name, u.email, u.profile_image, tp.bio, tp.specialization, tp.certification,
+    SELECT u.id, u.name, u.email, u.profile_image, 
+           tp.bio, tp.specialization, tp.certification,
+           tp.availability_monday, tp.availability_tuesday, tp.availability_wednesday,
+           tp.availability_thursday, tp.availability_friday, tp.availability_saturday,
+           tp.availability_sunday,
            (SELECT COUNT(*) FROM trainer_members WHERE trainer_id = u.id) as member_count
     FROM users u
     LEFT JOIN trainer_profiles tp ON u.id = tp.user_id
@@ -27,13 +31,18 @@ $trainersQuery = "
     ORDER BY u.name ASC
 ";
 
+
 $trainerStmt = $conn->prepare($trainersQuery);
 $trainerStmt->execute();
 $trainers = $trainerStmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Get my trainers (trainers assigned to this member)
 $myTrainersStmt = $conn->prepare("
-    SELECT u.id, u.name, u.email, u.profile_image, tp.bio, tp.specialization, tp.certification,
+    SELECT u.id, u.name, u.email, u.profile_image, 
+           tp.bio, tp.specialization, tp.certification,
+           tp.availability_monday, tp.availability_tuesday, tp.availability_wednesday,
+           tp.availability_thursday, tp.availability_friday, tp.availability_saturday,
+           tp.availability_sunday,
            tm.created_at 
     FROM trainer_members tm
     JOIN users u ON tm.trainer_id = u.id
@@ -41,6 +50,7 @@ $myTrainersStmt = $conn->prepare("
     WHERE tm.member_id = ?
     ORDER BY tm.created_at DESC
 ");
+
 $myTrainersStmt->execute([$userId]);
 $myTrainers = $myTrainersStmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -179,7 +189,7 @@ if (isset($_GET['get_availability']) && isset($_GET['trainer_id']) && isset($_GE
             SELECT 
                 availability_monday, availability_tuesday, availability_wednesday,
                 availability_thursday, availability_friday, availability_saturday, availability_sunday
-            FROM trainer_settings 
+            FROM trainer_profiles 
             WHERE user_id = ?
         ");
         $availabilityStmt->execute([$trainerId]);

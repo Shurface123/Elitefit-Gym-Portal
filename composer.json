@@ -1,7 +1,13 @@
 {
+    "name": "hp/elitefitgym",
+    "description": "A PHP-based gym management and tracking system.",
+    "authors": [
+        {
+            "name": "Lovelace John Kwaku Baidoo",
+            "email": "lovelacejohnkwakubaidoo@gmail.com"
+        }
+    ],
     "require": {
-        "tecnickcom/tcpdf": "^6.9",
-        "phpoffice/phpspreadsheet": "^1.29",
         "phpmailer/phpmailer": "^6.10"
     }
 }

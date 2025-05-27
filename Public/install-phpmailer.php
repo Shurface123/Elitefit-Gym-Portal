@@ -353,8 +353,8 @@ if (isset($_POST['install']) && $composerInstalled && !$phpmailerInstalled) {
                             <p>Edit the <code>forgot-password.php</code> file to configure your SMTP settings:</p>
                             <code>
 $mail->Host       = 'smtp.gmail.com'; // Change to your SMTP server<br>
-$mail->Username   = 'your-email@gmail.com'; // Change to your email<br>
-$mail->Password   = 'your-app-password'; // Change to your app password
+$mail->Username   = 'lovelacejohnkwakubaidoo@gmail.com'; // Change to your email<br>
+$mail->Password   = 'qdep zzus harq poqb'; // Change to your app password
                             </code>
                             <p>For Gmail, you'll need to create an App Password. <a href="https://support.google.com/accounts/answer/185833" target="_blank">Learn how</a></p>
                         </div>

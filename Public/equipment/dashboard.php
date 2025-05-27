@@ -12,604 +12,247 @@ require_once 'dashboard-theme-helper.php';
 $userId = $_SESSION['user_id'];
 $userName = $_SESSION['name'] ?? 'Equipment Manager';
 
-// Get theme preference
-$theme = getThemePreference($userId);
+// Get theme preference (default to dark)
+$theme = getThemePreference($userId) ?: 'dark';
 $themeClasses = getThemeClasses($theme);
 
 // Connect to database
 $conn = connectDB();
 
-// Get equipment statistics
+// Get equipment statistics with enhanced queries
 $equipmentStmt = $conn->prepare("
     SELECT 
         COUNT(CASE WHEN status = 'Available' THEN 1 END) as available_count,
         COUNT(CASE WHEN status = 'In Use' THEN 1 END) as in_use_count,
         COUNT(CASE WHEN status = 'Maintenance' THEN 1 END) as maintenance_count,
         COUNT(CASE WHEN status = 'Retired' THEN 1 END) as retired_count,
-        COUNT(*) as total_equipment
+        COUNT(*) as total_equipment,
+        AVG(CASE WHEN purchase_date IS NOT NULL THEN DATEDIFF(CURDATE(), purchase_date) END) as avg_age_days,
+        COUNT(CASE WHEN purchase_date > DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN 1 END) as new_equipment_count
     FROM equipment
 ");
 $equipmentStmt->execute();
 $equipmentStats = $equipmentStmt->fetch(PDO::FETCH_ASSOC);
 
-// Check if maintenance_schedule table exists
-$tableCheckStmt = $conn->prepare("
-    SELECT COUNT(*) 
-    FROM information_schema.tables 
-    WHERE table_schema = DATABASE() 
-    AND table_name = 'maintenance_schedule'
+// Enhanced maintenance statistics
+$maintenanceStmt = $conn->prepare("
+    SELECT 
+        COUNT(CASE WHEN status = 'Scheduled' THEN 1 END) as scheduled_count,
+        COUNT(CASE WHEN status = 'In Progress' THEN 1 END) as in_progress_count,
+        COUNT(CASE WHEN status = 'Completed' AND scheduled_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN 1 END) as completed_count,
+        COUNT(CASE WHEN status = 'Overdue' OR (status = 'Scheduled' AND scheduled_date < CURDATE()) THEN 1 END) as overdue_count,
+        COUNT(*) as total_maintenance,
+        AVG(CASE WHEN status = 'Completed' AND actual_duration IS NOT NULL THEN actual_duration END) as avg_completion_time,
+        COUNT(CASE WHEN priority = 'High' AND status != 'Completed' THEN 1 END) as high_priority_pending
+    FROM maintenance_schedule
 ");
-$tableCheckStmt->execute();
-$maintenanceTableExists = $tableCheckStmt->fetchColumn();
+$maintenanceStmt->execute();
+$maintenanceStats = $maintenanceStmt->fetch(PDO::FETCH_ASSOC);
 
-// Get maintenance statistics
-if ($maintenanceTableExists) {
-    $maintenanceStmt = $conn->prepare("
-        SELECT 
-            COUNT(CASE WHEN status = 'Scheduled' THEN 1 END) as scheduled_count,
-            COUNT(CASE WHEN status = 'In Progress' THEN 1 END) as in_progress_count,
-            COUNT(CASE WHEN status = 'Completed' AND scheduled_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN 1 END) as completed_count,
-            COUNT(CASE WHEN status = 'Overdue' OR (status = 'Scheduled' AND scheduled_date < CURDATE()) THEN 1 END) as overdue_count,
-            COUNT(*) as total_maintenance
-        FROM maintenance_schedule
-    ");
-    $maintenanceStmt->execute();
-    $maintenanceStats = $maintenanceStmt->fetch(PDO::FETCH_ASSOC);
+// Get real-time calendar events
+$calendarEvents = [];
+$calendarStmt = $conn->prepare("
+    SELECT 
+        m.id,
+        m.scheduled_date as event_date,
+        m.description as title,
+        e.name as equipment_name,
+        m.priority,
+        m.status,
+        'maintenance' as event_type
+    FROM maintenance_schedule m
+    JOIN equipment e ON m.equipment_id = e.id
+    WHERE m.scheduled_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+    UNION ALL
+    SELECT 
+        NULL as id,
+        delivery_date as event_date,
+        CONCAT('Delivery: ', item_name) as title,
+        supplier as equipment_name,
+        'Medium' as priority,
+        'Scheduled' as status,
+        'delivery' as event_type
+    FROM inventory 
+    WHERE delivery_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+    ORDER BY event_date
+");
+$calendarStmt->execute();
+$calendarEvents = $calendarStmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get enhanced equipment usage analytics
+$usageAnalytics = [];
+$usageStmt = $conn->prepare("
+    SELECT 
+        DATE(usage_date) as date,
+        COUNT(*) as usage_count,
+        COUNT(DISTINCT equipment_id) as unique_equipment,
+        AVG(duration_minutes) as avg_duration
+    FROM equipment_usage 
+    WHERE usage_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+    GROUP BY DATE(usage_date)
+    ORDER BY date
+");
+$usageStmt->execute();
+$usageAnalytics = $usageStmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get equipment performance metrics
+$performanceMetrics = [];
+$performanceStmt = $conn->prepare("
+    SELECT 
+        e.id,
+        e.name,
+        e.type,
+        COUNT(u.id) as usage_frequency,
+        AVG(u.duration_minutes) as avg_usage_duration,
+        COUNT(m.id) as maintenance_frequency,
+        DATEDIFF(CURDATE(), e.purchase_date) as age_days,
+        e.expected_lifetime_days,
+        (DATEDIFF(CURDATE(), e.purchase_date) / NULLIF(e.expected_lifetime_days, 0)) * 100 as lifecycle_percentage
+    FROM equipment e
+    LEFT JOIN equipment_usage u ON e.id = u.equipment_id AND u.usage_date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+    LEFT JOIN maintenance_schedule m ON e.id = m.equipment_id
+    WHERE e.status != 'Retired'
+    GROUP BY e.id
+    ORDER BY usage_frequency DESC
+    LIMIT 10
+");
+$performanceStmt->execute();
+$performanceMetrics = $performanceStmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Get current date and calendar data
+$currentDate = new DateTime();
+$currentMonth = $currentDate->format('n');
+$currentYear = $currentDate->format('Y');
+$currentDay = $currentDate->format('j');
+
+// Generate calendar data for current month
+function generateCalendarData($year, $month, $events = []) {
+    $firstDay = new DateTime("$year-$month-01");
+    $lastDay = new DateTime($firstDay->format('Y-m-t'));
+    $startDate = clone $firstDay;
+    $startDate->modify('last sunday');
     
-    // Get maintenance completion rate
-    $completionRateStmt = $conn->prepare("
-        SELECT 
-            COUNT(CASE WHEN status = 'Completed' THEN 1 END) * 100 / COUNT(*) as completion_rate
-        FROM maintenance_schedule
-        WHERE scheduled_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-    ");
-    $completionRateStmt->execute();
-    $completionRate = $completionRateStmt->fetchColumn();
-    $completionRate = $completionRate ? round($completionRate) : 0;
-} else {
-    // Create default stats if table doesn't exist
-    $maintenanceStats = [
-        'scheduled_count' => 0,
-        'in_progress_count' => 0,
-        'completed_count' => 0,
-        'overdue_count' => 0,
-        'total_maintenance' => 0
-    ];
-    $completionRate = 0;
-}
-
-// Check if activity_log table exists and has the required columns
-$activityLogCheckStmt = $conn->prepare("
-    SELECT COUNT(*) 
-    FROM information_schema.tables 
-    WHERE table_schema = DATABASE() 
-    AND table_name = 'activity_log'
-");
-$activityLogCheckStmt->execute();
-$activityLogExists = $activityLogCheckStmt->fetchColumn();
-
-// Get recent equipment activity
-if ($activityLogExists) {
-    // Check if the required columns exist
-    $columnCheckStmt = $conn->prepare("
-        SELECT 
-            COUNT(*) as column_count
-        FROM information_schema.columns 
-        WHERE table_schema = DATABASE() 
-        AND table_name = 'activity_log' 
-        AND column_name IN ('equipment_id', 'action', 'user_id', 'timestamp')
-    ");
-    $columnCheckStmt->execute();
-    $columnCount = $columnCheckStmt->fetchColumn();
+    $endDate = clone $lastDay;
+    $endDate->modify('next saturday');
     
-    if ($columnCount >= 4) {
-        // All required columns exist
-        $activityStmt = $conn->prepare("
-    SELECT a.id, a.action, a.timestamp, e.name as equipment_name, u.name as user_name, 
-           e.type as equipment_type
-    FROM activity_log a
-    LEFT JOIN equipment e ON a.equipment_id = e.id
-    LEFT JOIN users u ON a.user_id = u.id
-    WHERE a.equipment_id IS NOT NULL
-    ORDER BY a.timestamp DESC
-    LIMIT 8
-");
-        $activityStmt->execute();
-        $recentActivity = $activityStmt->fetchAll(PDO::FETCH_ASSOC);
-    } else {
-        // Missing columns, use a simpler query
-        $activityStmt = $conn->prepare("
-    SELECT id, action, timestamp, NULL as equipment_name, NULL as user_name, 
-           NULL as equipment_type
-    FROM activity_log
-    ORDER BY timestamp DESC
-    LIMIT 8
-");
-        $activityStmt->execute();
-        $recentActivity = $activityStmt->fetchAll(PDO::FETCH_ASSOC);
-    }
-} else {
-    $recentActivity = [];
-}
-
-// Check if upcoming maintenance can be queried
-$upcomingMaintenance = [];
-if ($maintenanceTableExists) {
-    try {
-        $upcomingStmt = $conn->prepare("
-            SELECT m.id, e.name as equipment_name, e.type as equipment_type, 
-                   m.scheduled_date, m.description, m.status, m.priority,
-                   u.name as assigned_to, m.estimated_duration
-            FROM maintenance_schedule m
-            JOIN equipment e ON m.equipment_id = e.id
-            LEFT JOIN users u ON m.assigned_to = u.id
-            WHERE (m.status = 'Scheduled' OR m.status = 'In Progress' OR 
-                  (m.status = 'Overdue' OR (m.status = 'Scheduled' AND m.scheduled_date < CURDATE())))
-            ORDER BY 
-                CASE 
-                    WHEN m.status = 'Overdue' OR (m.status = 'Scheduled' AND m.scheduled_date < CURDATE()) THEN 1
-                    WHEN m.priority = 'High' THEN 2
-                    WHEN m.priority = 'Medium' THEN 3
-                    ELSE 4
-                END,
-                m.scheduled_date
-            LIMIT 8
-        ");
-        $upcomingStmt->execute();
-        $upcomingMaintenance = $upcomingStmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch (PDOException $e) {
-        // If there's an error, just leave the array empty
-        error_log("Error fetching upcoming maintenance: " . $e->getMessage());
-    }
-}
-
-// Check if equipment_usage table exists
-$usageTableCheckStmt = $conn->prepare("
-    SELECT COUNT(*) 
-    FROM information_schema.tables 
-    WHERE table_schema = DATABASE() 
-    AND table_name = 'equipment_usage'
-");
-$usageTableCheckStmt->execute();
-$usageTableExists = $usageTableCheckStmt->fetchColumn();
-
-// Get equipment usage data for chart
-$usageDates = [];
-$usageCounts = [];
-if ($usageTableExists) {
-    try {
-        // Get the last 14 days regardless of whether there's data
-        $dateRangeStmt = $conn->prepare("
-            SELECT 
-                DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL n DAY), '%Y-%m-%d') as date
-            FROM (
-                SELECT 0 as n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION
-                SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION
-                SELECT 10 UNION SELECT 11 UNION SELECT 12 UNION SELECT 13
-            ) numbers
-            ORDER BY date
-        ");
-        $dateRangeStmt->execute();
-        $dateRange = $dateRangeStmt->fetchAll(PDO::FETCH_COLUMN);
+    $calendar = [];
+    $current = clone $startDate;
+    
+    while ($current <= $endDate) {
+        $dayData = [
+            'date' => $current->format('Y-m-d'),
+            'day' => $current->format('j'),
+            'is_current_month' => $current->format('n') == $month,
+            'is_today' => $current->format('Y-m-d') === date('Y-m-d'),
+            'events' => []
+        ];
         
-        // Get actual usage data
-        $usageStmt = $conn->prepare("
-            SELECT 
-                DATE_FORMAT(usage_date, '%Y-%m-%d') as date,
-                COUNT(*) as count
-            FROM equipment_usage
-            WHERE usage_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
-            GROUP BY DATE_FORMAT(usage_date, '%Y-%m-%d')
-        ");
-        $usageStmt->execute();
-        $usageData = $usageStmt->fetchAll(PDO::FETCH_KEY_PAIR);
-        
-        // Combine the date range with actual data
-        foreach ($dateRange as $date) {
-            $usageDates[] = $date;
-            $usageCounts[] = isset($usageData[$date]) ? $usageData[$date] : 0;
-        }
-        
-        // If no data at all, provide default values
-        if (empty($usageDates)) {
-            for ($i = 13; $i >= 0; $i--) {
-                $date = date('Y-m-d', strtotime("-$i days"));
-                $usageDates[] = $date;
-                $usageCounts[] = 0;
+        // Add events for this day
+        foreach ($events as $event) {
+            if ($event['event_date'] === $current->format('Y-m-d')) {
+                $dayData['events'][] = $event;
             }
         }
-    } catch (PDOException $e) {
-        // If there's an error, create default data for the last 14 days
-        error_log("Error fetching usage data: " . $e->getMessage());
-        for ($i = 13; $i >= 0; $i--) {
-            $date = date('Y-m-d', strtotime("-$i days"));
-            $usageDates[] = $date;
-            $usageCounts[] = 0;
-        }
-    }
-} else {
-    // If table doesn't exist, create default data for the last 14 days
-    for ($i = 13; $i >= 0; $i--) {
-        $date = date('Y-m-d', strtotime("-$i days"));
-        $usageDates[] = $date;
-        $usageCounts[] = 0;
-    }
-}
-
-// Get equipment type distribution for chart
-$typeLabels = [];
-$typeCounts = [];
-try {
-    // First check if there's any equipment data
-    $countStmt = $conn->prepare("SELECT COUNT(*) FROM equipment");
-    $countStmt->execute();
-    $equipmentCount = $countStmt->fetchColumn();
-    
-    if ($equipmentCount > 0) {
-        $typeStmt = $conn->prepare("
-            SELECT 
-                COALESCE(type, 'Unknown') as type, 
-                COUNT(*) as count
-            FROM equipment
-            GROUP BY type
-            ORDER BY count DESC
-        ");
-        $typeStmt->execute();
-        $typeData = $typeStmt->fetchAll(PDO::FETCH_ASSOC);
         
-        // Format type data for chart
-        foreach ($typeData as $data) {
-            $typeLabels[] = $data['type'];
-            $typeCounts[] = $data['count'];
-        }
-    } else {
-        // Add default data if no equipment exists
-        $typeLabels = ['No Equipment'];
-        $typeCounts = [0];
-    }
-} catch (PDOException $e) {
-    // If there's an error, add default data
-    error_log("Error fetching equipment type data: " . $e->getMessage());
-    $typeLabels = ['Error Loading Data'];
-    $typeCounts = [0];
-}
-
-// Get maintenance trend data for chart
-$maintenanceTrendLabels = [];
-$scheduledData = [];
-$completedData = [];
-$overdueData = [];
-
-// Generate last 6 months regardless of data
-for ($i = 5; $i >= 0; $i--) {
-    $date = new DateTime();
-    $date->modify("-$i months");
-    $maintenanceTrendLabels[] = $date->format('M Y');
-    $scheduledData[] = 0;
-    $completedData[] = 0;
-    $overdueData[] = 0;
-}
-
-if ($maintenanceTableExists) {
-    try {
-        $trendStmt = $conn->prepare("
-            SELECT 
-                DATE_FORMAT(scheduled_date, '%Y-%m') as month,
-                COUNT(CASE WHEN status = 'Scheduled' OR status = 'In Progress' THEN 1 END) as scheduled,
-                COUNT(CASE WHEN status = 'Completed' THEN 1 END) as completed,
-                COUNT(CASE WHEN status = 'Overdue' OR (status = 'Scheduled' AND scheduled_date < CURDATE()) THEN 1 END) as overdue
-            FROM maintenance_schedule
-            WHERE scheduled_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-            GROUP BY DATE_FORMAT(scheduled_date, '%Y-%m')
-        ");
-        $trendStmt->execute();
-        $trendData = $trendStmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        // Format trend data for chart
-        if (!empty($trendData)) {
-            // Reset arrays since we have actual data
-            $maintenanceTrendLabels = [];
-            $scheduledData = [];
-            $completedData = [];
-            $overdueData = [];
-            
-            foreach ($trendData as $data) {
-                // Convert YYYY-MM to Month YYYY format
-                $date = DateTime::createFromFormat('Y-m', $data['month']);
-                $maintenanceTrendLabels[] = $date->format('M Y');
-                $scheduledData[] = (int)$data['scheduled'];
-                $completedData[] = (int)$data['completed'];
-                $overdueData[] = (int)$data['overdue'];
-            }
-        }
-    } catch (PDOException $e) {
-        error_log("Error fetching maintenance trend data: " . $e->getMessage());
-    }
-}
-
-// Check if inventory table exists
-$inventoryTableCheckStmt = $conn->prepare("
-    SELECT COUNT(*) 
-    FROM information_schema.tables 
-    WHERE table_schema = DATABASE() 
-    AND table_name = 'inventory'
-");
-$inventoryTableCheckStmt->execute();
-$inventoryTableExists = $inventoryTableCheckStmt->fetchColumn();
-
-// Get inventory alerts (low stock)
-$inventoryAlerts = [];
-if ($inventoryTableExists) {
-    try {
-        // Check if the inventory table has the expected columns
-        $inventoryColumnsStmt = $conn->prepare("
-            SELECT 
-                COUNT(*) as column_count
-            FROM information_schema.columns 
-            WHERE table_schema = DATABASE() 
-            AND table_name = 'inventory' 
-            AND column_name IN ('item_name', 'quantity', 'min_quantity')
-        ");
-        $inventoryColumnsStmt->execute();
-        $inventoryColumnsCount = $inventoryColumnsStmt->fetchColumn();
-        
-        if ($inventoryColumnsCount >= 3) {
-            $inventoryStmt = $conn->prepare("
-                SELECT id, item_name as name, quantity, min_quantity, 
-                       category, last_ordered, supplier
-                FROM inventory
-                WHERE quantity <= min_quantity
-                ORDER BY (quantity / min_quantity)
-                LIMIT 8
-            ");
-            $inventoryStmt->execute();
-            $inventoryAlerts = $inventoryStmt->fetchAll(PDO::FETCH_ASSOC);
-        }
-    } catch (PDOException $e) {
-        // If there's an error, just leave the array empty
-        error_log("Error fetching inventory alerts: " . $e->getMessage());
-    }
-}
-
-// Get equipment health status
-$equipmentHealthData = [];
-try {
-    $healthStmt = $conn->prepare("
-        SELECT 
-            e.id, e.name, e.type, e.status,
-            DATEDIFF(CURDATE(), e.purchase_date) as age_days,
-            e.expected_lifetime_days,
-            CASE 
-                WHEN e.expected_lifetime_days > 0 THEN 
-                    ROUND((DATEDIFF(CURDATE(), e.purchase_date) / e.expected_lifetime_days) * 100)
-                ELSE 0
-            END as lifecycle_percentage,
-            (SELECT COUNT(*) FROM maintenance_schedule WHERE equipment_id = e.id AND status = 'Completed') as maintenance_count,
-            (SELECT MAX(scheduled_date) FROM maintenance_schedule WHERE equipment_id = e.id AND status = 'Completed') as last_maintenance
-        FROM equipment e
-        WHERE e.status != 'Retired'
-        ORDER BY lifecycle_percentage DESC
-        LIMIT 5
-    ");
-    $healthStmt->execute();
-    $equipmentHealthData = $healthStmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (PDOException $e) {
-    error_log("Error fetching equipment health data: " . $e->getMessage());
-}
-
-// Get top used equipment
-$topUsedEquipment = [];
-if ($usageTableExists) {
-    try {
-        $topUsedStmt = $conn->prepare("
-            SELECT 
-                e.id, e.name, e.type, e.status,
-                COUNT(u.id) as usage_count
-            FROM equipment e
-            JOIN equipment_usage u ON e.id = u.equipment_id
-            WHERE u.usage_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-            GROUP BY e.id
-            ORDER BY usage_count DESC
-            LIMIT 5
-        ");
-        $topUsedStmt->execute();
-        $topUsedEquipment = $topUsedStmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch (PDOException $e) {
-        error_log("Error fetching top used equipment: " . $e->getMessage());
-    }
-}
-
-// Get notifications
-$notifications = [];
-try {
-    // Overdue maintenance
-    if ($maintenanceTableExists) {
-        $overdueStmt = $conn->prepare("
-            SELECT 
-                'maintenance_overdue' as type,
-                CONCAT('Maintenance for ', e.name, ' is overdue') as message,
-                m.scheduled_date as date,
-                CONCAT('maintenance.php?action=view&id=', m.id) as link
-            FROM maintenance_schedule m
-            JOIN equipment e ON m.equipment_id = e.id
-            WHERE m.status = 'Overdue' OR (m.status = 'Scheduled' AND m.scheduled_date < CURDATE())
-            ORDER BY m.scheduled_date
-            LIMIT 5
-        ");
-        $overdueStmt->execute();
-        $overdueNotifications = $overdueStmt->fetchAll(PDO::FETCH_ASSOC);
-        $notifications = array_merge($notifications, $overdueNotifications);
+        $calendar[] = $dayData;
+        $current->modify('+1 day');
     }
     
-    // Low inventory
-    if ($inventoryTableExists) {
-        $lowInventoryStmt = $conn->prepare("
-            SELECT 
-                'inventory_low' as type,
-                CONCAT(item_name, ' is low in stock (', quantity, ' remaining)') as message,
-                NOW() as date,
-                CONCAT('inventory.php?action=view&id=', id) as link
-            FROM inventory
-            WHERE quantity <= min_quantity
-            ORDER BY (quantity / min_quantity)
-            LIMIT 5
-        ");
-        $lowInventoryStmt->execute();
-        $inventoryNotifications = $lowInventoryStmt->fetchAll(PDO::FETCH_ASSOC);
-        $notifications = array_merge($notifications, $inventoryNotifications);
-    }
-    
-    // Equipment nearing end of life
-    $eolStmt = $conn->prepare("
-        SELECT 
-            'equipment_eol' as type,
-            CONCAT(name, ' is nearing end of life (', 
-                ROUND((DATEDIFF(CURDATE(), purchase_date) / expected_lifetime_days) * 100), 
-                '% of lifecycle)') as message,
-            purchase_date as date,
-            CONCAT('equipment.php?action=view&id=', id) as link
-        FROM equipment
-        WHERE 
-            expected_lifetime_days > 0 AND
-            (DATEDIFF(CURDATE(), purchase_date) / expected_lifetime_days) > 0.8 AND
-            (DATEDIFF(CURDATE(), purchase_date) / expected_lifetime_days) < 1 AND
-            status != 'Retired'
-        ORDER BY (DATEDIFF(CURDATE(), purchase_date) / expected_lifetime_days) DESC
-        LIMIT 5
-    ");
-    $eolStmt->execute();
-    $eolNotifications = $eolStmt->fetchAll(PDO::FETCH_ASSOC);
-    $notifications = array_merge($notifications, $eolNotifications);
-    
-    // Sort notifications by date
-    usort($notifications, function($a, $b) {
-        return strtotime($b['date']) - strtotime($a['date']);
-    });
-    
-    // Limit to 10 most recent
-    $notifications = array_slice($notifications, 0, 10);
-    
-} catch (PDOException $e) {
-    error_log("Error fetching notifications: " . $e->getMessage());
+    return $calendar;
 }
 
-// Get quick stats
-$quickStats = [
-    'maintenance_completion_rate' => $completionRate,
-    'equipment_utilization' => 0,
-    'inventory_health' => 0
-];
+$calendarData = generateCalendarData($currentYear, $currentMonth, $calendarEvents);
 
-// Calculate equipment utilization
-if ($usageTableExists) {
-    try {
-        $utilizationStmt = $conn->prepare("
-            SELECT 
-                COUNT(DISTINCT u.equipment_id) * 100 / NULLIF(COUNT(DISTINCT e.id), 0) as utilization_rate
-            FROM equipment e
-            LEFT JOIN equipment_usage u ON e.id = u.equipment_id AND u.usage_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-            WHERE e.status != 'Retired' AND e.status != 'Maintenance'
-        ");
-        $utilizationStmt->execute();
-        $utilizationRate = $utilizationStmt->fetchColumn();
-        $quickStats['equipment_utilization'] = $utilizationRate !== null ? round($utilizationRate) : 0;
-    } catch (PDOException $e) {
-        error_log("Error calculating equipment utilization: " . $e->getMessage());
-    }
-}
-
-// Calculate inventory health
-if ($inventoryTableExists) {
-    try {
-        $inventoryHealthStmt = $conn->prepare("
-            SELECT 
-                COUNT(CASE WHEN quantity > min_quantity THEN 1 END) * 100 / NULLIF(COUNT(*), 0) as health_rate
-            FROM inventory
-        ");
-        $inventoryHealthStmt->execute();
-        $healthRate = $inventoryHealthStmt->fetchColumn();
-        $quickStats['inventory_health'] = $healthRate !== null ? round($healthRate) : 0;
-    } catch (PDOException $e) {
-        error_log("Error calculating inventory health: " . $e->getMessage());
-    }
-}
-
-// Get weather data for maintenance planning (mock data for now)
+// Get weather data (enhanced with more details)
 $weatherData = [
-    'today' => ['temp' => 72, 'condition' => 'Sunny', 'icon' => 'sun'],
-    'tomorrow' => ['temp' => 68, 'condition' => 'Partly Cloudy', 'icon' => 'cloud-sun'],
-    'day_after' => ['temp' => 65, 'condition' => 'Rain', 'icon' => 'cloud-rain']
+    'current' => [
+        'temp' => 72,
+        'condition' => 'Sunny',
+        'icon' => 'sun',
+        'humidity' => 45,
+        'wind_speed' => 8,
+        'maintenance_suitable' => true
+    ],
+    'forecast' => [
+        [
+            'date' => date('Y-m-d', strtotime('+1 day')),
+            'temp' => 68,
+            'condition' => 'Partly Cloudy',
+            'icon' => 'cloud-sun',
+            'maintenance_suitable' => true
+        ],
+        [
+            'date' => date('Y-m-d', strtotime('+2 days')),
+            'temp' => 65,
+            'condition' => 'Rain',
+            'icon' => 'cloud-rain',
+            'maintenance_suitable' => false
+        ],
+        [
+            'date' => date('Y-m-d', strtotime('+3 days')),
+            'temp' => 70,
+            'condition' => 'Clear',
+            'icon' => 'sun',
+            'maintenance_suitable' => true
+        ]
+    ]
 ];
 
-// Function to get appropriate icon for notification type
-function getNotificationIcon($type) {
-    switch ($type) {
-        case 'maintenance_overdue':
-            return 'fas fa-exclamation-triangle text-danger';
-        case 'inventory_low':
-            return 'fas fa-box-open text-warning';
-        case 'equipment_eol':
-            return 'fas fa-hourglass-end text-info';
-        default:
-            return 'fas fa-bell text-primary';
-    }
-}
-
-// Function to get appropriate badge class for maintenance status
-function getMaintenanceStatusBadgeClass($status, $scheduled_date = null) {
-    if ($status == 'Scheduled' && $scheduled_date && strtotime($scheduled_date) < strtotime('today')) {
-        return 'badge-danger'; // Overdue
-    }
+// Enhanced notification system
+$notifications = [];
+$notificationStmt = $conn->prepare("
+    SELECT 
+        'maintenance_due' as type,
+        CONCAT('Maintenance due for ', e.name) as message,
+        m.scheduled_date as date,
+        m.priority,
+        CONCAT('maintenance.php?id=', m.id) as link
+    FROM maintenance_schedule m
+    JOIN equipment e ON m.equipment_id = e.id
+    WHERE m.scheduled_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY) 
+    AND m.status = 'Scheduled'
     
-    switch ($status) {
-        case 'Completed':
-            return 'badge-success';
-        case 'In Progress':
-            return 'badge-info';
-        case 'Scheduled':
-            return 'badge-primary';
-        case 'Overdue':
-            return 'badge-danger';
-        default:
-            return 'badge-secondary';
-    }
-}
-
-// Function to get appropriate badge class for priority
-function getPriorityBadgeClass($priority) {
-    switch ($priority) {
-        case 'High':
-            return 'badge-danger';
-        case 'Medium':
-            return 'badge-warning';
-        case 'Low':
-            return 'badge-info';
-        default:
-            return 'badge-secondary';
-    }
-}
-
-// Function to format relative time
-function getRelativeTime($timestamp) {
-    $time = strtotime($timestamp);
-    $now = time();
-    $diff = $now - $time;
+    UNION ALL
     
-    if ($diff < 60) {
-        return 'Just now';
-    } elseif ($diff < 3600) {
-        $mins = floor($diff / 60);
-        return $mins . ' min' . ($mins > 1 ? 's' : '') . ' ago';
-    } elseif ($diff < 86400) {
-        $hours = floor($diff / 3600);
-        return $hours . ' hour' . ($hours > 1 ? 's' : '') . ' ago';
-    } elseif ($diff < 604800) {
-        $days = floor($diff / 86400);
-        return $days . ' day' . ($days > 1 ? 's' : '') . ' ago';
-    } else {
-        return date('M j, Y', $time);
-    }
-}
+    SELECT 
+        'inventory_low' as type,
+        CONCAT(item_name, ' stock is low (', quantity, ' remaining)') as message,
+        NOW() as date,
+        CASE 
+            WHEN quantity <= min_quantity * 0.3 THEN 'High'
+            WHEN quantity <= min_quantity * 0.6 THEN 'Medium'
+            ELSE 'Low'
+        END as priority,
+        CONCAT('inventory.php?id=', id) as link
+    FROM inventory
+    WHERE quantity <= min_quantity
+    
+    UNION ALL
+    
+    SELECT 
+        'equipment_alert' as type,
+        CONCAT(name, ' requires attention (', 
+            ROUND((DATEDIFF(CURDATE(), purchase_date) / expected_lifetime_days) * 100), 
+            '% lifecycle)') as message,
+        NOW() as date,
+        'Medium' as priority,
+        CONCAT('equipment.php?id=', id) as link
+    FROM equipment
+    WHERE expected_lifetime_days > 0 
+    AND (DATEDIFF(CURDATE(), purchase_date) / expected_lifetime_days) > 0.85
+    AND status != 'Retired'
+    
+    ORDER BY 
+        CASE priority 
+            WHEN 'High' THEN 1 
+            WHEN 'Medium' THEN 2 
+            ELSE 3 
+        END,
+        date DESC
+    LIMIT 15
+");
+$notificationStmt->execute();
+$notifications = $notificationStmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>
@@ -618,2510 +261,1587 @@ function getRelativeTime($timestamp) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Equipment Manager Dashboard - EliteFit Gym</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/index.min.js"></script>
     <style>
         :root {
-            --primary: #ff6600;
-            --primary-dark: #e65c00;
-            --primary-light: #ff8533;
-            --primary-very-light: #fff0e6;
-            --secondary: #1a1a1a;
-            --secondary-dark: #000000;
-            --secondary-light: #333333;
-            --light: #f8f9fa;
-            --dark: #121212;
-            --darker: #0a0a0a;
-            --success: #28a745;
-            --danger: #dc3545;
-            --warning: #ffc107;
-            --info: #17a2b8;
-            --border-radius: 8px;
-            --card-border-radius: 12px;
-            --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-            --transition-speed: 0.3s;
+            /* Enhanced Orange & Dark Theme */
+            --primary: #ff6b35;
+            --primary-dark: #e55a2b;
+            --primary-light: #ff8c5a;
+            --primary-very-light: #fff4f0;
+            --accent: #ff9500;
+            --accent-dark: #e6850e;
+            
+            /* Dark Theme Colors */
+            --dark-bg: #0a0a0a;
+            --dark-surface: #1a1a1a;
+            --dark-surface-light: #2d2d2d;
+            --dark-border: #404040;
+            --dark-text: #ffffff;
+            --dark-text-secondary: #b3b3b3;
+            
+            /* Light Theme Colors */
+            --light-bg: #fafafa;
+            --light-surface: #ffffff;
+            --light-surface-alt: #f5f5f5;
+            --light-border: #e0e0e0;
+            --light-text: #1a1a1a;
+            --light-text-secondary: #666666;
+            
+            /* Status Colors */
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            
+            /* Spacing & Effects */
+            --border-radius: 12px;
+            --border-radius-lg: 16px;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
         
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Poppins', sans-serif;
         }
         
         body {
-            background-color: #f5f7fa;
-            color: var(--secondary);
-            min-height: 100vh;
-            transition: background-color var(--transition-speed), color var(--transition-speed);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--dark-bg);
+            color: var(--dark-text);
+            line-height: 1.6;
+            transition: var(--transition);
         }
         
-        body.dark-theme {
-            background-color: var(--dark);
-            color: #f5f5f5;
+        body.light-theme {
+            background-color: var(--light-bg);
+            color: var(--light-text);
         }
         
-        .dashboard-container {
-            display: flex;
-            min-height: 100vh;
-        }
-        
+        /* Enhanced Sidebar */
         .sidebar {
-            width: 260px;
-            background-color: var(--secondary);
-            color: white;
-            padding: 20px;
             position: fixed;
+            top: 0;
+            left: 0;
             height: 100vh;
-            overflow-y: auto;
+            width: 280px;
+            background: linear-gradient(180deg, var(--dark-surface) 0%, var(--dark-surface-light) 100%);
+            border-right: 1px solid var(--dark-border);
             z-index: 1000;
-            transition: all var(--transition-speed);
-            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1);
+            transition: var(--transition);
+            overflow-y: auto;
         }
         
-        .dark-theme .sidebar {
-            background-color: var(--secondary-dark);
-            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.3);
+        .light-theme .sidebar {
+            background: linear-gradient(180deg, var(--light-surface) 0%, var(--light-surface-alt) 100%);
+            border-right: 1px solid var(--light-border);
         }
         
         .sidebar-header {
+            padding: 2rem 1.5rem;
+            border-bottom: 1px solid var(--dark-border);
             display: flex;
             align-items: center;
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            gap: 1rem;
         }
         
-        .sidebar-header h2 {
-            font-size: 1.5rem;
-            margin-left: 10px;
-            color: var(--primary);
-            font-weight: 600;
+        .light-theme .sidebar-header {
+            border-bottom: 1px solid var(--light-border);
         }
         
-        .sidebar-menu {
-            list-style: none;
-            padding: 0;
-        }
-        
-        .sidebar-menu li {
-            margin-bottom: 5px;
-        }
-        
-        .sidebar-menu a {
-            display: flex;
-            align-items: center;
-            padding: 12px 15px;
-            color: rgba(255, 255, 255, 0.8);
-            text-decoration: none;
+        .sidebar-logo {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
             border-radius: var(--border-radius);
-            transition: all var(--transition-speed);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.25rem;
+            font-weight: 700;
+        }
+        
+        .sidebar-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        
+        .sidebar-nav {
+            padding: 1rem 0;
+        }
+        
+        .nav-section {
+            margin-bottom: 2rem;
+        }
+        
+        .nav-section-title {
+            padding: 0 1.5rem 0.5rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--dark-text-secondary);
+        }
+        
+        .light-theme .nav-section-title {
+            color: var(--light-text-secondary);
+        }
+        
+        .nav-item {
+            margin: 0.25rem 1rem;
+        }
+        
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            border-radius: var(--border-radius);
+            color: var(--dark-text-secondary);
+            text-decoration: none;
             font-weight: 500;
+            transition: var(--transition);
+            position: relative;
         }
         
-        .sidebar-menu a:hover {
-            background-color: rgba(255, 102, 0, 0.2);
+        .light-theme .nav-link {
+            color: var(--light-text-secondary);
+        }
+        
+        .nav-link:hover {
+            background-color: rgba(255, 107, 53, 0.1);
+            color: var(--primary);
+            transform: translateX(4px);
+        }
+        
+        .nav-link.active {
+            background: linear-gradient(135deg, var(--primary), var(--accent));
             color: white;
+            box-shadow: var(--shadow);
         }
         
-        .sidebar-menu a.active {
-            background-color: var(--primary);
-            color: white;
-            box-shadow: 0 4px 8px rgba(255, 102, 0, 0.3);
+        .nav-link.active::before {
+            content: '';
+            position: absolute;
+            left: -1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 4px;
+            height: 20px;
+            background: var(--primary);
+            border-radius: 0 4px 4px 0;
         }
         
-        .sidebar-menu a i {
-            margin-right: 10px;
+        .nav-icon {
             width: 20px;
             text-align: center;
             font-size: 1.1rem;
         }
         
-        .sidebar-footer {
-            position: absolute;
-            bottom: 20px;
-            width: calc(100% - 40px);
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding-top: 20px;
-        }
-        
-        .sidebar-footer a {
-            display: flex;
-            align-items: center;
-            color: rgba(255, 255, 255, 0.8);
-            text-decoration: none;
-            padding: 10px;
-            border-radius: var(--border-radius);
-            transition: all var(--transition-speed);
-        }
-        
-        .sidebar-footer a:hover {
-            background-color: rgba(255, 255, 255, 0.1);
-            color: white;
-        }
-        
-        .sidebar-footer a i {
-            margin-right: 10px;
-            width: 20px;
-            text-align: center;
-        }
-        
+        /* Enhanced Main Content */
         .main-content {
-            flex: 1;
-            margin-left: 260px;
-            padding: 20px;
-            transition: all var(--transition-speed);
+            margin-left: 280px;
+            min-height: 100vh;
+            background-color: var(--dark-bg);
+            transition: var(--transition);
         }
         
+        .light-theme .main-content {
+            background-color: var(--light-bg);
+        }
+        
+        /* Enhanced Header */
         .header {
+            background: var(--dark-surface);
+            border-bottom: 1px solid var(--dark-border);
+            padding: 1rem 2rem;
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            margin-bottom: 30px;
-            background-color: white;
-            padding: 15px 20px;
-            border-radius: var(--card-border-radius);
-            box-shadow: var(--box-shadow);
+            justify-content: space-between;
+            backdrop-filter: blur(10px);
             position: sticky;
             top: 0;
-            z-index: 900;
+            z-index: 100;
         }
         
-        .dark-theme .header {
-            background-color: var(--secondary-light);
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        .light-theme .header {
+            background: var(--light-surface);
+            border-bottom: 1px solid var(--light-border);
         }
         
-        .header h1 {
-            font-size: 1.8rem;
-            color: var(--secondary);
-            margin: 0;
-            font-weight: 600;
-        }
-        
-        .dark-theme .header h1 {
-            color: #f5f5f5;
-        }
-        
-        .header-actions {
+        .header-left {
             display: flex;
             align-items: center;
-            gap: 15px;
+            gap: 1rem;
         }
         
-        .search-bar {
+        .header-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--dark-text);
+        }
+        
+        .light-theme .header-title {
+            color: var(--light-text);
+        }
+        
+        .header-subtitle {
+            font-size: 0.875rem;
+            color: var(--dark-text-secondary);
+            margin-top: 0.25rem;
+        }
+        
+        .light-theme .header-subtitle {
+            color: var(--light-text-secondary);
+        }
+        
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        /* Enhanced Search */
+        .search-container {
             position: relative;
-            margin-right: 15px;
         }
         
-        .search-bar input {
-            padding: 8px 15px 8px 35px;
-            border-radius: 50px;
-            border: 1px solid #e0e0e0;
-            background-color: #f5f5f5;
-            width: 200px;
-            transition: all var(--transition-speed);
+        .search-input {
+            width: 300px;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            background: var(--dark-surface-light);
+            border: 1px solid var(--dark-border);
+            border-radius: var(--border-radius);
+            color: var(--dark-text);
+            font-size: 0.875rem;
+            transition: var(--transition);
         }
         
-        .dark-theme .search-bar input {
-            background-color: var(--secondary-dark);
-            border-color: #444;
-            color: white;
+        .light-theme .search-input {
+            background: var(--light-surface-alt);
+            border: 1px solid var(--light-border);
+            color: var(--light-text);
         }
         
-        .search-bar input:focus {
-            width: 250px;
+        .search-input:focus {
             outline: none;
             border-color: var(--primary);
-            box-shadow: 0 0 0 2px rgba(255, 102, 0, 0.2);
+            box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.1);
+            width: 350px;
         }
         
-        .search-bar i {
+        .search-icon {
             position: absolute;
-            left: 12px;
+            left: 0.75rem;
             top: 50%;
             transform: translateY(-50%);
-            color: #888;
+            color: var(--dark-text-secondary);
+            font-size: 0.875rem;
         }
         
-        .dark-theme .search-bar i {
-            color: #aaa;
+        .light-theme .search-icon {
+            color: var(--light-text-secondary);
         }
         
+        /* Enhanced Theme Toggle */
+        .theme-toggle {
+            position: relative;
+            width: 60px;
+            height: 30px;
+            background: var(--dark-surface-light);
+            border-radius: 15px;
+            border: 1px solid var(--dark-border);
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        
+        .light-theme .theme-toggle {
+            background: var(--light-surface-alt);
+            border: 1px solid var(--light-border);
+        }
+        
+        .theme-toggle.active {
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border-color: var(--primary);
+        }
+        
+        .theme-toggle-slider {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 26px;
+            height: 26px;
+            background: white;
+            border-radius: 50%;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            color: var(--dark-text);
+        }
+        
+        .theme-toggle.active .theme-toggle-slider {
+            transform: translateX(30px);
+            color: var(--primary);
+        }
+        
+        /* Enhanced Notifications */
         .notification-bell {
             position: relative;
+            width: 40px;
+            height: 40px;
+            background: var(--dark-surface-light);
+            border: 1px solid var(--dark-border);
+            border-radius: var(--border-radius);
+            display: flex;
+            align-items: center;
+            justify-content: center;
             cursor: pointer;
-            font-size: 1.2rem;
-            color: #555;
-            transition: all var(--transition-speed);
+            transition: var(--transition);
         }
         
-        .dark-theme .notification-bell {
-            color: #ddd;
+        .light-theme .notification-bell {
+            background: var(--light-surface-alt);
+            border: 1px solid var(--light-border);
         }
         
         .notification-bell:hover {
-            color: var(--primary);
+            background: var(--primary);
+            border-color: var(--primary);
+            color: white;
         }
         
         .notification-badge {
             position: absolute;
             top: -5px;
             right: -5px;
-            background-color: var(--danger);
+            width: 20px;
+            height: 20px;
+            background: var(--danger);
             color: white;
             border-radius: 50%;
-            width: 18px;
-            height: 18px;
-            font-size: 0.7rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .notification-dropdown {
-            position: absolute;
-            top: 100%;
-            right: 0;
-            width: 320px;
-            background-color: white;
-            border-radius: var(--border-radius);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-            padding: 0;
-            z-index: 1000;
-            display: none;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        
-        .dark-theme .notification-dropdown {
-            background-color: var(--secondary-light);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
-        }
-        
-        .notification-dropdown.show {
-            display: block;
-        }
-        
-        .notification-header {
-            padding: 15px;
-            border-bottom: 1px solid #eee;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .dark-theme .notification-header {
-            border-color: #444;
-        }
-        
-        .notification-header h5 {
-            margin: 0;
-            font-size: 1rem;
-        }
-        
-        .notification-list {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-        }
-        
-        .notification-item {
-            padding: 12px 15px;
-            border-bottom: 1px solid #eee;
-            display: flex;
-            align-items: center;
-            transition: background-color var(--transition-speed);
-        }
-        
-        .dark-theme .notification-item {
-            border-color: #444;
-        }
-        
-        .notification-item:hover {
-            background-color: #f9f9f9;
-        }
-        
-        .dark-theme .notification-item:hover {
-            background-color: var(--secondary-dark);
-        }
-        
-        .notification-icon {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            background-color: rgba(255, 102, 0, 0.1);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 12px;
-            flex-shrink: 0;
-        }
-        
-        .notification-content {
-            flex: 1;
-        }
-        
-        .notification-message {
-            margin: 0 0 5px;
-            font-size: 0.9rem;
-        }
-        
-        .notification-time {
             font-size: 0.75rem;
-            color: #888;
-        }
-        
-        .dark-theme .notification-time {
-            color: #aaa;
-        }
-        
-        .notification-footer {
-            padding: 10px;
-            text-align: center;
-            border-top: 1px solid #eee;
-        }
-        
-        .dark-theme .notification-footer {
-            border-color: #444;
-        }
-        
-        .user-info {
+            font-weight: 600;
             display: flex;
             align-items: center;
+            justify-content: center;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        /* Enhanced User Menu */
+        .user-menu {
             position: relative;
         }
         
-        .user-info img {
+        .user-avatar {
             width: 40px;
             height: 40px;
-            border-radius: 50%;
-            margin-right: 10px;
-            object-fit: cover;
+            border-radius: var(--border-radius);
             border: 2px solid var(--primary);
-        }
-        
-        .user-info .dropdown {
-            position: relative;
-        }
-        
-        .user-info .dropdown-toggle {
             cursor: pointer;
-            display: flex;
-            align-items: center;
-            padding: 5px 10px;
-            border-radius: var(--border-radius);
-            transition: background-color var(--transition-speed);
+            transition: var(--transition);
         }
         
-        .user-info .dropdown-toggle:hover {
-            background-color: rgba(0, 0, 0, 0.05);
+        .user-avatar:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 0 4px rgba(255, 107, 53, 0.2);
         }
         
-        .dark-theme .user-info .dropdown-toggle:hover {
-            background-color: rgba(255, 255, 255, 0.05);
-        }
-        
-        .user-info .dropdown-menu {
-            position: absolute;
-            right: 0;
-            top: 100%;
-            background-color: white;
-            border-radius: var(--border-radius);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-            padding: 10px 0;
-            min-width: 200px;
-            z-index: 1000;
-            display: none;
-        }
-        
-        .dark-theme .user-info .dropdown-menu {
-            background-color: var(--secondary-light);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
-        }
-        
-        .user-info .dropdown-menu.show {
-            display: block;
-        }
-        
-        .user-info .dropdown-menu a {
-            display: flex;
-            align-items: center;
-            padding: 8px 20px;
-            color: var(--secondary);
-            text-decoration: none;
-            transition: all var(--transition-speed);
-        }
-        
-        .dark-theme .user-info .dropdown-menu a {
-            color: #f5f5f5;
-        }
-        
-        .user-info .dropdown-menu a:hover {
-            background-color: #f8f9fa;
-        }
-        
-        .dark-theme .user-info .dropdown-menu a:hover {
-            background-color: var(--secondary-dark);
-        }
-        
-        .user-info .dropdown-menu a i {
-            margin-right: 10px;
-            width: 20px;
-            text-align: center;
-        }
-        
-        .user-info .dropdown-divider {
-            height: 1px;
-            background-color: #eee;
-            margin: 8px 0;
-        }
-        
-        .dark-theme .user-info .dropdown-divider {
-            background-color: #444;
-        }
-        
-        .dashboard-section {
-            margin-bottom: 30px;
-        }
-        
-        .section-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-        }
-        
-        .section-header h2 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--secondary);
-            margin: 0;
-        }
-        
-        .dark-theme .section-header h2 {
-            color: #f5f5f5;
-        }
-        
-        .section-actions {
-            display: flex;
-            gap: 10px;
-        }
-        
-        .dashboard-cards {
+        /* Enhanced Dashboard Grid */
+        .dashboard-container {
+            padding: 2rem;
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 1.5rem;
         }
         
+        /* Enhanced Cards */
         .card {
-            background-color: white;
-            border-radius: var(--card-border-radius);
-            box-shadow: var(--box-shadow);
-            padding: 20px;
-            transition: transform var(--transition-speed), box-shadow var(--transition-speed);
-            border: none;
-            height: 100%;
+            background: var(--dark-surface);
+            border: 1px solid var(--dark-border);
+            border-radius: var(--border-radius-lg);
+            padding: 1.5rem;
+            transition: var(--transition);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .light-theme .card {
+            background: var(--light-surface);
+            border: 1px solid var(--light-border);
         }
         
         .card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.1);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-lg);
         }
         
-        .dark-theme .card {
-            background-color: var(--secondary-light);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-        }
-        
-        .dark-theme .card:hover {
-            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.3);
-        }
-        
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-            padding: 0;
-            background: none;
-            border: none;
-        }
-        
-        .card-header h3 {
-            font-size: 1.2rem;
-            color: var(--secondary);
-            margin: 0;
-            font-weight: 600;
-        }
-        
-        .dark-theme .card-header h3 {
-            color: #f5f5f5;
-        }
-        
-        .card-body {
-            color: var(--secondary);
-            padding: 0;
-        }
-        
-        .dark-theme .card-body {
-            color: #f5f5f5;
-        }
-        
-        .card-icon {
-            width: 50px;
-            height: 50px;
-            border-radius: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-size: 1.5rem;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-        }
-        
-        .card-icon.available {
-            background-color: var(--success);
-        }
-        
-        .card-icon.in-use {
-            background-color: var(--info);
-        }
-        
-        .card-icon.maintenance {
-            background-color: var(--warning);
-        }
-        
-        .card-icon.retired {
-            background-color: var(--secondary);
-        }
-        
-        .card-icon.total {
-            background-color: var(--primary);
-        }
-        
-        .card-icon.scheduled {
-            background-color: var(--info);
-        }
-        
-        .card-icon.in-progress {
-            background-color: var(--warning);
-        }
-        
-        .card-icon.completed {
-            background-color: var(--success);
-        }
-        
-        .card-icon.overdue {
-            background-color: var(--danger);
-        }
-        
-        .stat-value {
-            font-size: 2rem;
-            font-weight: 700;
-            margin: 10px 0 5px;
-            color: var(--primary);
-        }
-        
-        .stat-label {
-            font-size: 0.9rem;
-            color: #777;
-            margin: 0;
-        }
-        
-        .dark-theme .stat-label {
-            color: #aaa;
-        }
-        
-        .stat-change {
-            display: flex;
-            align-items: center;
-            font-size: 0.8rem;
-            margin-top: 5px;
-        }
-        
-        .stat-change.positive {
-            color: var(--success);
-        }
-        
-        .stat-change.negative {
-            color: var(--danger);
-        }
-        
-        .quick-stat-card {
-            display: flex;
-            align-items: center;
-            padding: 15px;
-            border-radius: var(--card-border-radius);
-            background-color: white;
-            box-shadow: var(--box-shadow);
-            transition: transform var(--transition-speed);
-        }
-        
-        .quick-stat-card:hover {
-            transform: translateY(-3px);
-        }
-        
-        .dark-theme .quick-stat-card {
-            background-color: var(--secondary-light);
-        }
-        
-        .quick-stat-icon {
-            width: 60px;
-            height: 60px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 15px;
-            font-size: 1.5rem;
-            color: white;
-        }
-        
-        .quick-stat-content {
-            flex: 1;
-        }
-        
-        .quick-stat-value {
-            font-size: 1.8rem;
-            font-weight: 700;
-            margin: 0;
-            line-height: 1.2;
-        }
-        
-        .quick-stat-label {
-            font-size: 0.9rem;
-            color: #777;
-            margin: 0;
-        }
-        
-        .dark-theme .quick-stat-label {
-            color: #aaa;
-        }
-        
-        .chart-container {
-            background-color: white;
-            border-radius: var(--card-border-radius);
-            box-shadow: var(--box-shadow);
-            padding: 20px;
-            margin-bottom: 30px;
-            height: 100%;
-        }
-        
-        .dark-theme .chart-container {
-            background-color: var(--secondary-light);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-        }
-        
-        .chart-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-        }
-        
-        .chart-header h3 {
-            font-size: 1.2rem;
-            color: var(--secondary);
-            margin: 0;
-            font-weight: 600;
-        }
-        
-        .dark-theme .chart-header h3 {
-            color: #f5f5f5;
-        }
-        
-        .chart-actions {
-            display: flex;
-            gap: 10px;
-        }
-        
-        .chart-legend {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 15px;
-            margin-top: 10px;
-        }
-        
-        .legend-item {
-            display: flex;
-            align-items: center;
-            font-size: 0.85rem;
-        }
-        
-        .legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 3px;
-            margin-right: 5px;
-        }
-        
-        .activity-list, .maintenance-list, .inventory-alerts {
-            background-color: white;
-            border-radius: var(--card-border-radius);
-            box-shadow: var(--box-shadow);
-            overflow: hidden;
-            margin-bottom: 30px;
-            height: 100%;
-        }
-        
-        .dark-theme .activity-list, 
-        .dark-theme .maintenance-list, 
-        .dark-theme .inventory-alerts {
-            background-color: var(--secondary-light);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-        }
-        
-        .activity-list-header, 
-        .maintenance-list-header, 
-        .inventory-alerts-header {
-            padding: 15px 20px;
-            background-color: var(--secondary);
-            color: white;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .activity-list-header h3, 
-        .maintenance-list-header h3, 
-        .inventory-alerts-header h3 {
-            font-size: 1.2rem;
-            margin: 0;
-            font-weight: 600;
-        }
-        
-        .activity-list-body, 
-        .maintenance-list-body, 
-        .inventory-alerts-body {
-            padding: 0;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        
-        .table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 0;
-        }
-        
-        .table th, .table td {
-            padding: 12px 15px;
-            text-align: left;
-            border-bottom: 1px solid #eee;
-            vertical-align: middle;
-        }
-        
-        .dark-theme .table th, 
-        .dark-theme .table td {
-            border-bottom: 1px solid #444;
-        }
-        
-        .table th {
-            font-weight: 600;
-            color: var(--secondary);
-            background-color: #f8f9fa;
-            position: sticky;
-            top: 0;
-            z-index: 10;
-        }
-        
-        .dark-theme .table th {
-            color: #f5f5f5;
-            background-color: var(--secondary-dark);
-        }
-        
-        .table tbody tr {
-            transition: background-color var(--transition-speed);
-        }
-        
-        .table tbody tr:hover {
-            background-color: rgba(255, 102, 0, 0.05);
-        }
-        
-        .dark-theme .table tbody tr:hover {
-            background-color: rgba(255, 102, 0, 0.1);
-        }
-        
-        .badge {
-            display: inline-block;
-            padding: 5px 10px;
-            border-radius: 50px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            color: white;
-        }
-        
-        .badge-success {
-            background-color: var(--success);
-        }
-        
-        .badge-warning {
-            background-color: var(--warning);
-        }
-        
-        .badge-info {
-            background-color: var(--info);
-        }
-        
-        .badge-danger {
-            background-color: var(--danger);
-        }
-        
-        .badge-primary {
-            background-color: var(--primary);
-        }
-        
-        .badge-secondary {
-            background-color: var(--secondary);
-        }
-        
-        .btn {
-            padding: 8px 15px;
-            background-color: var(--primary);
-            color: white;
-            border: none;
-            border-radius: var(--border-radius);
-            cursor: pointer;
-            transition: all var(--transition-speed);
-            text-decoration: none;
-            display: inline-block;
-            font-weight: 500;
-        }
-        
-        .btn:hover {
-            background-color: var(--primary-dark);
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(255, 102, 0, 0.3);
-        }
-        
-        .btn-sm {
-            padding: 5px 10px;
-            font-size: 0.9rem;
-        }
-        
-        .btn-outline {
-            background-color: transparent;
-            border: 1px solid var(--primary);
-            color: var(--primary);
-        }
-        
-        .btn-outline:hover {
-            background-color: var(--primary);
-            color: white;
-        }
-        
-        .dark-theme .btn-outline {
-            border-color: var(--primary);
-            color: var(--primary);
-        }
-        
-        .dark-theme .btn-outline:hover {
-            background-color: var(--primary);
-            color: white;
-        }
-        
-        .btn-secondary {
-            background-color: var(--secondary);
-        }
-        
-        .btn-secondary:hover {
-            background-color: var(--secondary-light);
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-        }
-        
-        .btn-success {
-            background-color: var(--success);
-        }
-        
-        .btn-success:hover {
-            background-color: #218838;
-            box-shadow: 0 4px 8px rgba(40, 167, 69, 0.3);
-        }
-        
-        .btn-danger {
-            background-color: var(--danger);
-        }
-        
-        .btn-danger:hover {
-            background-color: #c82333;
-            box-shadow: 0 4px 8px rgba(220, 53, 69, 0.3);
-        }
-        
-        .btn-icon {
-            width: 36px;
-            height: 36px;
-            padding: 0;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 50%;
-        }
-        
-        .theme-switch {
-            display: flex;
-            align-items: center;
-            margin-right: 20px;
-        }
-        
-        .theme-switch label {
-            margin: 0 10px 0 0;
-            cursor: pointer;
-            color: #888;
-        }
-        
-        .dark-theme .theme-switch label {
-            color: #ddd;
-        }
-        
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 50px;
-            height: 24px;
-        }
-        
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-        
-        .slider {
+        .card::before {
+            content: '';
             position: absolute;
-            cursor: pointer;
             top: 0;
             left: 0;
             right: 0;
-            bottom: 0;
-            background-color: #ccc;
-            transition: .4s;
-            border-radius: 24px;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary), var(--accent));
         }
         
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 16px;
-            width: 16px;
-            left: 4px;
-            bottom: 4px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
+        .stat-card {
+            grid-column: span 3;
         }
         
-        input:checked + .slider {
-            background-color: var(--primary);
-        }
-        
-        input:checked + .slider:before {
-            transform: translateX(26px);
-        }
-        
-        .progress-bar {
-            height: 8px;
-            border-radius: 4px;
-            background-color: #e9ecef;
-            margin-top: 5px;
-            overflow: hidden;
-        }
-        
-        .dark-theme .progress-bar {
-            background-color: #444;
-        }
-        
-        .progress-bar-fill {
-            height: 100%;
-            border-radius: 4px;
-            background-color: var(--danger);
-            transition: width 0.5s ease;
-        }
-        
-        .progress-bar-fill.low {
-            background-color: var(--danger);
-        }
-        
-        .progress-bar-fill.medium {
-            background-color: var(--warning);
-        }
-        
-        .progress-bar-fill.high {
-            background-color: var(--success);
-        }
-        
-        .progress-label {
+        .stat-card-header {
             display: flex;
+            align-items: center;
             justify-content: space-between;
-            font-size: 0.75rem;
-            color: #777;
-            margin-top: 5px;
+            margin-bottom: 1rem;
         }
         
-        .dark-theme .progress-label {
-            color: #aaa;
-        }
-        
-        .weather-widget {
-            display: flex;
-            justify-content: space-between;
-            background-color: white;
-            border-radius: var(--card-border-radius);
-            box-shadow: var(--box-shadow);
-            padding: 15px;
-            margin-bottom: 20px;
-        }
-        
-        .dark-theme .weather-widget {
-            background-color: var(--secondary-light);
-        }
-        
-        .weather-day {
-            text-align: center;
-            padding: 10px;
-        }
-        
-        .weather-icon {
-            font-size: 2rem;
-            margin: 10px 0;
-            color: var(--primary);
-        }
-        
-        .weather-temp {
-            font-size: 1.2rem;
-            font-weight: 600;
-        }
-        
-        .weather-condition {
-            font-size: 0.9rem;
-            color: #777;
-        }
-        
-        .dark-theme .weather-condition {
-            color: #aaa;
-        }
-        
-        .equipment-health-card {
-            display: flex;
-            align-items: center;
-            padding: 15px;
-            border-radius: var(--card-border-radius);
-            background-color: white;
-            box-shadow: var(--box-shadow);
-            margin-bottom: 15px;
-            transition: transform var(--transition-speed);
-        }
-        
-        .equipment-health-card:hover {
-            transform: translateY(-3px);
-        }
-        
-        .dark-theme .equipment-health-card {
-            background-color: var(--secondary-light);
-        }
-        
-        .equipment-health-icon {
-            width: 50px;
-            height: 50px;
-            border-radius: 50%;
+        .stat-card-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: var(--border-radius);
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-right: 15px;
-            font-size: 1.2rem;
+            font-size: 1.25rem;
             color: white;
-            flex-shrink: 0;
         }
         
-        .equipment-health-content {
-            flex: 1;
+        .stat-card-value {
+            font-size: 2.5rem;
+            font-weight: 800;
+            line-height: 1;
+            margin-bottom: 0.5rem;
         }
         
-        .equipment-health-name {
-            font-weight: 600;
-            margin: 0 0 5px;
-        }
-        
-        .equipment-health-type {
-            font-size: 0.85rem;
-            color: #777;
-            margin: 0 0 8px;
-        }
-        
-        .dark-theme .equipment-health-type {
-            color: #aaa;
-        }
-        
-        .action-buttons {
-            display: flex;
-            gap: 5px;
-        }
-        
-        .action-btn {
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            background-color: var(--primary);
-            border: none;
-            cursor: pointer;
-            transition: all var(--transition-speed);
-            font-size: 0.8rem;
-        }
-        
-        .action-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
-        }
-        
-        .action-btn.view {
-            background-color: var(--info);
-        }
-        
-        .action-btn.edit {
-            background-color: var(--warning);
-        }
-        
-        .action-btn.complete {
-            background-color: var(--success);
-        }
-        
-        .action-btn.delete {
-            background-color: var(--danger);
-        }
-        
-        .activity-item {
-            display: flex;
-            padding: 15px;
-            border-bottom: 1px solid #eee;
-            transition: background-color var(--transition-speed);
-        }
-        
-        .dark-theme .activity-item {
-            border-color: #444;
-        }
-        
-        .activity-item:hover {
-            background-color: rgba(255, 102, 0, 0.05);
-        }
-        
-        .dark-theme .activity-item:hover {
-            background-color: rgba(255, 102, 0, 0.1);
-        }
-        
-        .activity-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 15px;
-            flex-shrink: 0;
-            color: white;
-            font-size: 1rem;
-        }
-        
-        .activity-content {
-            flex: 1;
-        }
-        
-        .activity-title {
+        .stat-card-label {
+            font-size: 0.875rem;
+            color: var(--dark-text-secondary);
             font-weight: 500;
-            margin: 0 0 5px;
         }
         
-        .activity-meta {
+        .light-theme .stat-card-label {
+            color: var(--light-text-secondary);
+        }
+        
+        .stat-card-change {
             display: flex;
-            justify-content: space-between;
-            font-size: 0.85rem;
-            color: #777;
+            align-items: center;
+            gap: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-top: 0.5rem;
         }
         
-        .dark-theme .activity-meta {
-            color: #aaa;
+        .stat-card-change.positive {
+            color: var(--success);
         }
         
-        .activity-time {
-            font-style: italic;
+        .stat-card-change.negative {
+            color: var(--danger);
         }
         
+        /* Enhanced Calendar */
         .calendar-widget {
-            background-color: white;
-            border-radius: var(--card-border-radius);
-            box-shadow: var(--box-shadow);
-            padding: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .dark-theme .calendar-widget {
-            background-color: var(--secondary-light);
+            grid-column: span 6;
         }
         
         .calendar-header {
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
+            justify-content: between;
+            margin-bottom: 1.5rem;
         }
         
         .calendar-title {
-            font-size: 1.2rem;
-            font-weight: 600;
-            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--dark-text);
+        }
+        
+        .light-theme .calendar-title {
+            color: var(--light-text);
         }
         
         .calendar-nav {
             display: flex;
-            gap: 10px;
+            gap: 0.5rem;
+            margin-left: auto;
         }
         
         .calendar-nav-btn {
-            width: 30px;
-            height: 30px;
-            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: var(--dark-surface-light);
+            color: var(--dark-text);
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: var(--transition);
             display: flex;
             align-items: center;
             justify-content: center;
-            background-color: #f5f5f5;
-            border: none;
-            cursor: pointer;
-            transition: all var(--transition-speed);
         }
         
-        .dark-theme .calendar-nav-btn {
-            background-color: var(--secondary-dark);
-            color: #ddd;
+        .light-theme .calendar-nav-btn {
+            background: var(--light-surface-alt);
+            color: var(--light-text);
         }
         
         .calendar-nav-btn:hover {
-            background-color: var(--primary-light);
+            background: var(--primary);
             color: white;
         }
         
         .calendar-grid {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
-            gap: 5px;
+            gap: 1px;
+            background: var(--dark-border);
+            border-radius: var(--border-radius);
+            overflow: hidden;
+        }
+        
+        .light-theme .calendar-grid {
+            background: var(--light-border);
         }
         
         .calendar-day-header {
+            background: var(--dark-surface-light);
+            padding: 0.75rem 0.5rem;
             text-align: center;
+            font-size: 0.75rem;
             font-weight: 600;
-            padding: 5px;
-            font-size: 0.9rem;
+            color: var(--dark-text-secondary);
+        }
+        
+        .light-theme .calendar-day-header {
+            background: var(--light-surface-alt);
+            color: var(--light-text-secondary);
         }
         
         .calendar-day {
-            aspect-ratio: 1;
-            border-radius: 8px;
-            padding: 5px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            transition: all var(--transition-speed);
-            cursor: pointer;
+            background: var(--dark-surface);
+            padding: 0.75rem 0.5rem;
+            min-height: 80px;
             position: relative;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        
+        .light-theme .calendar-day {
+            background: var(--light-surface);
         }
         
         .calendar-day:hover {
-            background-color: var(--primary-very-light);
-        }
-        
-        .dark-theme .calendar-day:hover {
-            background-color: rgba(255, 102, 0, 0.1);
+            background: rgba(255, 107, 53, 0.1);
         }
         
         .calendar-day.today {
-            background-color: var(--primary-very-light);
-            border: 1px solid var(--primary);
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            color: white;
         }
         
-        .dark-theme .calendar-day.today {
-            background-color: rgba(255, 102, 0, 0.2);
-        }
-        
-        .calendar-day.has-events::after {
-            content: '';
-            position: absolute;
-            bottom: 5px;
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background-color: var(--primary);
+        .calendar-day.other-month {
+            opacity: 0.3;
         }
         
         .calendar-day-number {
-            font-size: 0.9rem;
-            font-weight: 500;
-        }
-        
-        .calendar-day.other-month .calendar-day-number {
-            color: #aaa;
-        }
-        
-        .dark-theme .calendar-day.other-month .calendar-day-number {
-            color: #666;
-        }
-        
-        .calendar-events {
-            margin-top: 15px;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
         }
         
         .calendar-event {
-            padding: 8px 12px;
-            border-radius: 6px;
-            background-color: var(--primary-very-light);
+            background: rgba(255, 107, 53, 0.2);
             border-left: 3px solid var(--primary);
-            margin-bottom: 8px;
-            font-size: 0.85rem;
+            padding: 0.25rem;
+            margin-bottom: 0.25rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            line-height: 1.2;
         }
         
-        .dark-theme .calendar-event {
-            background-color: rgba(255, 102, 0, 0.1);
+        .calendar-event.high-priority {
+            border-left-color: var(--danger);
+            background: rgba(239, 68, 68, 0.2);
         }
         
-        .calendar-event-time {
-            font-weight: 600;
-            margin-bottom: 3px;
-        }
-        
-        .calendar-event-title {
-            color: #555;
-        }
-        
-        .dark-theme .calendar-event-title {
-            color: #ddd;
-        }
-        
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: repeat(12, 1fr);
-            gap: 20px;
-        }
-        
-        .grid-col-4 {
-            grid-column: span 4;
-        }
-        
-        .grid-col-6 {
+        /* Enhanced Charts */
+        .chart-container {
             grid-column: span 6;
+            position: relative;
         }
         
-        .grid-col-8 {
-            grid-column: span 8;
+        .chart-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
         }
         
-        .grid-col-12 {
+        .chart-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: var(--dark-text);
+        }
+        
+        .light-theme .chart-title {
+            color: var(--light-text);
+        }
+        
+        .chart-controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .chart-btn {
+            padding: 0.5rem 1rem;
+            background: var(--dark-surface-light);
+            border: 1px solid var(--dark-border);
+            border-radius: var(--border-radius);
+            color: var(--dark-text);
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        
+        .light-theme .chart-btn {
+            background: var(--light-surface-alt);
+            border: 1px solid var(--light-border);
+            color: var(--light-text);
+        }
+        
+        .chart-btn:hover,
+        .chart-btn.active {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: white;
+        }
+        
+        /* Enhanced Tables */
+        .data-table {
             grid-column: span 12;
         }
         
-        .circular-progress {
-            position: relative;
-            width: 80px;
-            height: 80px;
-            margin: 0 auto;
+        .table-container {
+            overflow-x: auto;
+            border-radius: var(--border-radius);
+            border: 1px solid var(--dark-border);
         }
         
-        .circular-progress svg {
-            transform: rotate(-90deg);
+        .light-theme .table-container {
+            border: 1px solid var(--light-border);
         }
         
-        .circular-progress circle {
-            fill: none;
-            stroke-width: 8;
-            stroke-linecap: round;
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0;
         }
         
-        .circular-progress .bg {
-            stroke: #eee;
+        .table th {
+            background: var(--dark-surface-light);
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--dark-text);
+            border-bottom: 1px solid var(--dark-border);
         }
         
-        .dark-theme .circular-progress .bg {
-            stroke: #444;
+        .light-theme .table th {
+            background: var(--light-surface-alt);
+            color: var(--light-text);
+            border-bottom: 1px solid var(--light-border);
         }
         
-        .circular-progress .progress {
-            stroke: var(--primary);
-            transition: stroke-dashoffset 0.5s ease;
+        .table td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--dark-border);
+            color: var(--dark-text);
         }
         
-        .circular-progress .text {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-size: 1.2rem;
-            font-weight: 700;
+        .light-theme .table td {
+            border-bottom: 1px solid var(--light-border);
+            color: var(--light-text);
+        }
+        
+        .table tbody tr:hover {
+            background: rgba(255, 107, 53, 0.05);
+        }
+        
+        /* Enhanced Badges */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.75rem;
+            border-radius: 50px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+        
+        .badge-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success);
+        }
+        
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+        }
+        
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+        
+        .badge-info {
+            background: rgba(59, 130, 246, 0.2);
+            color: var(--info);
+        }
+        
+        .badge-primary {
+            background: rgba(255, 107, 53, 0.2);
             color: var(--primary);
         }
         
-        @media (max-width: 1200px) {
-            .dashboard-grid {
-                grid-template-columns: repeat(6, 1fr);
-            }
-            
-            .grid-col-4, .grid-col-6 {
-                grid-column: span 3;
-            }
-            
-            .grid-col-8, .grid-col-12 {
-                grid-column: span 6;
-            }
+        /* Enhanced Buttons */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: var(--border-radius);
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            transition: var(--transition);
+            font-size: 0.875rem;
         }
         
-        @media (max-width: 992px) {
-            .dashboard-grid {
-                grid-template-columns: repeat(4, 1fr);
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-lg);
+        }
+        
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--primary);
+            color: var(--primary);
+        }
+        
+        .btn-outline:hover {
+            background: var(--primary);
+            color: white;
+        }
+        
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+        }
+        
+        /* Enhanced Weather Widget */
+        .weather-widget {
+            grid-column: span 6;
+        }
+        
+        .weather-current {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border-radius: var(--border-radius);
+            color: white;
+        }
+        
+        .weather-icon {
+            font-size: 3rem;
+        }
+        
+        .weather-details h3 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+        
+        .weather-details p {
+            opacity: 0.9;
+            margin: 0;
+        }
+        
+        .weather-forecast {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+        }
+        
+        .weather-day {
+            text-align: center;
+            padding: 1rem;
+            background: var(--dark-surface-light);
+            border-radius: var(--border-radius);
+            transition: var(--transition);
+        }
+        
+        .light-theme .weather-day {
+            background: var(--light-surface-alt);
+        }
+        
+        .weather-day:hover {
+            transform: translateY(-2px);
+        }
+        
+        .weather-day-icon {
+            font-size: 1.5rem;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        
+        .weather-day-temp {
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+        
+        .weather-day-condition {
+            font-size: 0.8rem;
+            color: var(--dark-text-secondary);
+        }
+        
+        .light-theme .weather-day-condition {
+            color: var(--light-text-secondary);
+        }
+        
+        /* Responsive Design */
+        @media (max-width: 1200px) {
+            .stat-card {
+                grid-column: span 6;
             }
             
-            .grid-col-4 {
-                grid-column: span 2;
-            }
-            
-            .grid-col-6, .grid-col-8, .grid-col-12 {
-                grid-column: span 4;
+            .calendar-widget,
+            .chart-container,
+            .weather-widget {
+                grid-column: span 12;
             }
         }
         
         @media (max-width: 768px) {
             .sidebar {
-                width: 70px;
-                padding: 20px 10px;
+                transform: translateX(-100%);
+            }
+            
+            .sidebar.open {
                 transform: translateX(0);
             }
             
-            .sidebar.expanded {
-                width: 260px;
-            }
-            
-            .sidebar-header h2, .sidebar-menu a span {
-                display: none;
-            }
-            
-            .sidebar.expanded .sidebar-header h2, 
-            .sidebar.expanded .sidebar-menu a span {
-                display: block;
-            }
-            
             .main-content {
-                margin-left: 70px;
+                margin-left: 0;
             }
             
-            .dashboard-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            
-            .grid-col-4, .grid-col-6, .grid-col-8, .grid-col-12 {
-                grid-column: span 2;
-            }
-            
-            .header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-            
-            .header-actions {
-                margin-top: 15px;
-                width: 100%;
-                justify-content: space-between;
-            }
-            
-            .search-bar {
-                width: 100%;
-                margin-right: 0;
-            }
-            
-            .search-bar input {
-                width: 100%;
-            }
-            
-            .user-info {
-                margin-top: 10px;
-                align-self: flex-end;
-            }
-        }
-        
-        @media (max-width: 576px) {
-            .dashboard-grid {
+            .dashboard-container {
+                padding: 1rem;
                 grid-template-columns: 1fr;
             }
             
-            .grid-col-4, .grid-col-6, .grid-col-8, .grid-col-12 {
+            .stat-card,
+            .calendar-widget,
+            .chart-container,
+            .weather-widget,
+            .data-table {
                 grid-column: span 1;
             }
             
-            .dashboard-cards {
-                grid-template-columns: 1fr;
+            .header {
+                padding: 1rem;
             }
             
-            .weather-widget {
-                flex-direction: column;
+            .search-input {
+                width: 200px;
             }
             
-            .weather-day {
-                margin-bottom: 15px;
+            .search-input:focus {
+                width: 250px;
             }
         }
         
-        /* Animations */
-        @keyframes pulse {
-            0% {
-                transform: scale(1);
-            }
-            50% {
-                transform: scale(1.05);
-            }
-            100% {
-                transform: scale(1);
-            }
+        /* Loading States */
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
         }
         
-        .pulse {
-            animation: pulse 2s infinite;
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--dark-border);
+            border-radius: 50%;
+            border-top-color: var(--primary);
+            animation: spin 1s ease-in-out infinite;
         }
         
-        /* Custom scrollbar */
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
         
-        ::-webkit-scrollbar-track {
-            background: #f1f1f1;
-            border-radius: 10px;
-        }
+        /* Utility Classes */
+        .text-primary { color: var(--primary) !important; }
+        .text-success { color: var(--success) !important; }
+        .text-warning { color: var(--warning) !important; }
+        .text-danger { color: var(--danger) !important; }
+        .text-info { color: var(--info) !important; }
         
-        .dark-theme ::-webkit-scrollbar-track {
-            background: #333;
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: #888;
-            border-radius: 10px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: #555;
-        }
-        
-        .dark-theme ::-webkit-scrollbar-thumb {
-            background: #666;
-        }
-        
-        .dark-theme ::-webkit-scrollbar-thumb:hover {
-            background: #888;
-        }
+        .bg-primary { background-color: var(--primary) !important; }
+        .bg-success { background-color: var(--success) !important; }
+        .bg-warning { background-color: var(--warning) !important; }
+        .bg-danger { background-color: var(--danger) !important; }
+        .bg-info { background-color: var(--info) !important; }
     </style>
 </head>
-<body class="<?php echo $theme === 'dark' ? 'dark-theme' : ''; ?>">
-    <div class="dashboard-container">
-        <!-- Sidebar -->
-        <div class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <i class="fas fa-dumbbell fa-2x" style="color: var(--primary);"></i>
-                <h2>EliteFit Gym</h2>
+<body class="<?php echo $theme === 'dark' ? '' : 'light-theme'; ?>">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-logo">
+                <i class="fas fa-dumbbell"></i>
             </div>
-            <ul class="sidebar-menu">
-                <li><a href="dashboard.php" class="active"><i class="fas fa-tachometer-alt"></i> <span>Dashboard</span></a></li>
-                <li><a href="equipment.php"><i class="fas fa-dumbbell"></i> <span>Equipment</span></a></li>
-                <li><a href="maintenance.php"><i class="fas fa-tools"></i> <span>Maintenance</span></a></li>
-                <li><a href="inventory.php"><i class="fas fa-boxes"></i> <span>Inventory</span></a></li>
-                <li class="nav-item">
-    <a class="nav-link" href="report.php">
-        <i class="fas fa-chart-bar"></i> <span>Reports</span>
-    </a>
-</li>
-                <li><a href="calendar.php"><i class="fas fa-calendar-alt"></i> <span>Calendar</span></a></li>
-                <li><a href="settings.php"><i class="fas fa-cog"></i> <span>Settings</span></a></li>
-            </ul>
-            <div class="sidebar-footer">
-                <a href="../logout.php"><i class="fas fa-sign-out-alt"></i> <span>Logout</span></a>
+            <div>
+                <div class="sidebar-title">EliteFit</div>
+                <div style="font-size: 0.8rem; color: var(--dark-text-secondary);">Equipment Manager</div>
             </div>
         </div>
         
-        <!-- Main Content -->
-        <div class="main-content">
-            <!-- Header -->
-            <div class="header">
-                <div class="d-flex align-items-center">
-                    <button id="sidebar-toggle" class="btn-icon btn-secondary me-3 d-md-none">
-                        <i class="fas fa-bars"></i>
-                    </button>
-                    <h1>Equipment Manager Dashboard</h1>
+        <nav class="sidebar-nav">
+            <div class="nav-section">
+                <div class="nav-section-title">Main</div>
+                <div class="nav-item">
+                    <a href="dashboard.php" class="nav-link active">
+                        <i class="nav-icon fas fa-tachometer-alt"></i>
+                        <span>Dashboard</span>
+                    </a>
                 </div>
-                <div class="header-actions">
-                    <div class="search-bar">
-                        <i class="fas fa-search"></i>
-                        <input type="text" placeholder="Search..." id="global-search">
-                    </div>
-                    <div class="notification-bell" id="notification-bell">
-                        <i class="fas fa-bell"></i>
-                        <?php if (count($notifications) > 0): ?>
-                        <span class="notification-badge"><?php echo count($notifications); ?></span>
-                        <?php endif; ?>
-                        <div class="notification-dropdown" id="notification-dropdown">
-                            <div class="notification-header">
-                                <h5>Notifications</h5>
-                                <a href="#" class="text-primary">Mark all as read</a>
-                            </div>
-                            <ul class="notification-list">
-                                <?php if (empty($notifications)): ?>
-                                <li class="notification-item">
-                                    <div class="notification-content">
-                                        <p class="notification-message">No new notifications</p>
-                                    </div>
-                                </li>
-                                <?php else: ?>
-                                    <?php foreach ($notifications as $notification): ?>
-                                    <li class="notification-item">
-                                        <div class="notification-icon">
-                                            <i class="<?php echo getNotificationIcon($notification['type']); ?>"></i>
-                                        </div>
-                                        <div class="notification-content">
-                                            <p class="notification-message"><?php echo htmlspecialchars($notification['message']); ?></p>
-                                            <span class="notification-time"><?php echo getRelativeTime($notification['date']); ?></span>
-                                        </div>
-                                    </li>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </ul>
-                            <div class="notification-footer">
-                                <a href="notifications.php" class="text-primary">View all notifications</a>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="theme-switch">
-                        <label for="theme-toggle">
-                            <i class="fas fa-moon" style="color: <?php echo $theme === 'dark' ? 'var(--primary)' : '#aaa'; ?>"></i>
-                        </label>
-                        <label class="switch">
-                            <input type="checkbox" id="theme-toggle" <?php echo $theme === 'dark' ? 'checked' : ''; ?>>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <div class="user-info">
-                        <img src="https://randomuser.me/api/portraits/men/3.jpg" alt="User Avatar">
-                        <div class="dropdown">
-                            <div class="dropdown-toggle" id="user-dropdown-toggle">
-                                <span><?php echo htmlspecialchars($userName); ?></span>
-                                <i class="fas fa-chevron-down ml-2"></i>
-                            </div>
-                            <div class="dropdown-menu" id="user-dropdown">
-                                <a href="profile.php"><i class="fas fa-user"></i> Profile</a>
-                                <a href="settings.php"><i class="fas fa-cog"></i> Settings</a>
-                                <div class="dropdown-divider"></div>
-                                <a href="../logout.php"><i class="fas fa-sign-out-alt"></i> Logout</a>
-                            </div>
-                        </div>
-                    </div>
+                <div class="nav-item">
+                    <a href="equipment.php" class="nav-link">
+                        <i class="nav-icon fas fa-dumbbell"></i>
+                        <span>Equipment</span>
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="maintenance.php" class="nav-link">
+                        <i class="nav-icon fas fa-tools"></i>
+                        <span>Maintenance</span>
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="inventory.php" class="nav-link">
+                        <i class="nav-icon fas fa-boxes"></i>
+                        <span>Inventory</span>
+                    </a>
                 </div>
             </div>
             
-            <!-- Quick Stats -->
-            <div class="dashboard-section">
-                <div class="row">
-                    <div class="col-md-4 mb-4">
-                        <div class="quick-stat-card">
-                            <div class="quick-stat-icon" style="background-color: var(--success);">
-                                <i class="fas fa-check-circle"></i>
-                            </div>
-                            <div class="quick-stat-content">
-                                <h2 class="quick-stat-value"><?php echo $quickStats['maintenance_completion_rate']; ?>%</h2>
-                                <p class="quick-stat-label">Maintenance Completion Rate</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-4 mb-4">
-                        <div class="quick-stat-card">
-                            <div class="quick-stat-icon" style="background-color: var(--primary);">
-                                <i class="fas fa-dumbbell"></i>
-                            </div>
-                            <div class="quick-stat-content">
-                                <h2 class="quick-stat-value"><?php echo $quickStats['equipment_utilization']; ?>%</h2>
-                                <p class="quick-stat-label">Equipment Utilization</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-4 mb-4">
-                        <div class="quick-stat-card">
-                            <div class="quick-stat-icon" style="background-color: var(--info);">
-                                <i class="fas fa-boxes"></i>
-                            </div>
-                            <div class="quick-stat-content">
-                                <h2 class="quick-stat-value"><?php echo $quickStats['inventory_health']; ?>%</h2>
-                                <p class="quick-stat-label">Inventory Health</p>
-                            </div>
-                        </div>
-                    </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Analytics</div>
+                <div class="nav-item">
+                    <a href="report.php" class="nav-link">
+                        <i class="nav-icon fas fa-chart-bar"></i>
+                        <span>Reports</span>
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="analytics.php" class="nav-link">
+                        <i class="nav-icon fas fa-chart-line"></i>
+                        <span>Analytics</span>
+                    </a>
                 </div>
             </div>
             
-            <!-- Equipment Status -->
-            <div class="dashboard-section">
-                <div class="section-header">
-                    <h2>Equipment Status</h2>
-                    <div class="section-actions">
-                        <a href="equipment.php" class="btn btn-sm btn-outline">View All Equipment</a>
-                    </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Tools</div>
+                <div class="nav-item">
+                    <a href="calendar.php" class="nav-link">
+                        <i class="nav-icon fas fa-calendar-alt"></i>
+                        <span>Calendar</span>
+                    </a>
                 </div>
-                <div class="dashboard-cards">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Available</h3>
-                            <div class="card-icon available">
-                                <i class="fas fa-check"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $equipmentStats['available_count'] ?? 0; ?></div>
-                            <p class="stat-label">Equipment Available</p>
-                            <div class="stat-change positive">
-                                <i class="fas fa-arrow-up me-1"></i> 5% from last week
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>In Use</h3>
-                            <div class="card-icon in-use">
-                                <i class="fas fa-user"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $equipmentStats['in_use_count'] ?? 0; ?></div>
-                            <p class="stat-label">Equipment In Use</p>
-                            <div class="stat-change positive">
-                                <i class="fas fa-arrow-up me-1"></i> 12% from last week
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Maintenance</h3>
-                            <div class="card-icon maintenance">
-                                <i class="fas fa-tools"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $equipmentStats['maintenance_count'] ?? 0; ?></div>
-                            <p class="stat-label">Under Maintenance</p>
-                            <div class="stat-change negative">
-                                <i class="fas fa-arrow-down me-1"></i> 3% from last week
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Retired</h3>
-                            <div class="card-icon retired">
-                                <i class="fas fa-archive"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $equipmentStats['retired_count'] ?? 0; ?></div>
-                            <p class="stat-label">Retired Equipment</p>
-                            <div class="stat-change">
-                                <i class="fas fa-minus me-1"></i> No change
-                            </div>
-                        </div>
-                    </div>
+                <div class="nav-item">
+                    <a href="settings.php" class="nav-link">
+                        <i class="nav-icon fas fa-cog"></i>
+                        <span>Settings</span>
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="../logout.php" class="nav-link">
+                        <i class="nav-icon fas fa-sign-out-alt"></i>
+                        <span>Logout</span>
+                    </a>
                 </div>
             </div>
-            
-            <!-- Maintenance Status -->
-            <div class="dashboard-section">
-                <div class="section-header">
-                    <h2>Maintenance Status</h2>
-                    <div class="section-actions">
-                        <a href="maintenance.php" class="btn btn-sm btn-outline">View All Maintenance</a>
-                    </div>
-                </div>
-                <div class="dashboard-cards">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Scheduled</h3>
-                            <div class="card-icon scheduled">
-                                <i class="fas fa-calendar"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $maintenanceStats['scheduled_count'] ?? 0; ?></div>
-                            <p class="stat-label">Scheduled Maintenance</p>
-                            <div class="progress-bar">
-                                <div class="progress-bar-fill medium" style="width: 65%"></div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>In Progress</h3>
-                            <div class="card-icon in-progress">
-                                <i class="fas fa-spinner"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $maintenanceStats['in_progress_count'] ?? 0; ?></div>
-                            <p class="stat-label">In Progress</p>
-                            <div class="progress-bar">
-                                <div class="progress-bar-fill high" style="width: 80%"></div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Completed</h3>
-                            <div class="card-icon completed">
-                                <i class="fas fa-check-circle"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $maintenanceStats['completed_count'] ?? 0; ?></div>
-                            <p class="stat-label">Completed This Month</p>
-                            <div class="progress-bar">
-                                <div class="progress-bar-fill high" style="width: 90%"></div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Overdue</h3>
-                            <div class="card-icon overdue">
-                                <i class="fas fa-exclamation-triangle"></i>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="stat-value"><?php echo $maintenanceStats['overdue_count'] ?? 0; ?></div>
-                            <p class="stat-label">Overdue Maintenance</p>
-                            <div class="progress-bar">
-                                <div class="progress-bar-fill low" style="width: 30%"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Dashboard Grid
-            <div class="dashboard-grid">
-                Equipment Usage Chart 
-                <div class="grid-col-6">
-                    <div class="chart-container">
-                        <div class="chart-header">
-                            <h3>Equipment Usage (Last 14 Days)</h3>
-                            <div class="chart-actions">
-                                <button class="btn btn-sm btn-outline" id="refresh-usage-chart">
-                                    <i class="fas fa-sync-alt"></i> Refresh
-                                </button>
-                            </div>
-                        </div>
-                        <canvas id="usageChart" height="15"></canvas>
-                    </div>
-                </div> -->
-                
-                <!-- Equipment Type Chart
-                <div class="grid-col-6">
-                    <div class="chart-container">
-                        <div class="chart-header">
-                            <h3>Equipment by Type</h3>
-                            <div class="chart-actions">
-                                <button class="btn btn-sm btn-outline" id="toggle-chart-type">
-                                    <i class="fas fa-chart-pie"></i> Toggle Chart
-                                </button>
-                            </div>
-                        </div>
-                        <canvas id="typeChart" height="15"></canvas>
-                    </div>
-                </div> -->
-                
-                <!-- Maintenance Trend Chart -->
-                <div class="grid-col-8">
-                    <div class="chart-container">
-                        <div class="chart-header">
-                            <h3>Maintenance Trends (6 Months)</h3>
-                            <div class="chart-actions">
-                                <select class="form-select form-select-sm" id="maintenance-chart-period">
-                                    <option value="6">Last 6 Months</option>
-                                    <option value="3">Last 3 Months</option>
-                                    <option value="12">Last 12 Months</option>
-                                </select>
-                            </div>
-                        </div>
-                        <canvas id="maintenanceTrendChart" height="250"></canvas>
-                        <div class="chart-legend">
-                            <div class="legend-item">
-                                <div class="legend-color" style="background-color: rgba(23, 162, 184, 0.8);"></div>
-                                <span>Scheduled</span>
-                            </div>
-                            <div class="legend-item">
-                                <div class="legend-color" style="background-color: rgba(40, 167, 69, 0.8);"></div>
-                                <span>Completed</span>
-                            </div>
-                            <div class="legend-item">
-                                <div class="legend-color" style="background-color: rgba(220, 53, 69, 0.8);"></div>
-                                <span>Overdue</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Equipment Health -->
-                <div class="grid-col-4">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Equipment Health</h3>
-                            <a href="equipment.php?filter=health" class="btn btn-sm btn-outline">View All</a>
-                        </div>
-                        <div class="card-body">
-                            <?php if (empty($equipmentHealthData)): ?>
-                            <div class="text-center py-4">
-                                <i class="fas fa-info-circle fa-2x mb-3" style="color: var(--primary);"></i>
-                                <p>No equipment health data available.</p>
-                            </div>
-                            <?php else: ?>
-                                <?php foreach ($equipmentHealthData as $equipment): ?>
-                                <div class="equipment-health-card">
-                                    <?php 
-                                        $healthClass = '';
-                                        $healthIcon = '';
-                                        if ($equipment['lifecycle_percentage'] >= 80) {
-                                            $healthClass = 'bg-danger';
-                                            $healthIcon = 'fa-exclamation-circle';
-                                        } elseif ($equipment['lifecycle_percentage'] >= 50) {
-                                            $healthClass = 'bg-warning';
-                                            $healthIcon = 'fa-exclamation-triangle';
-                                        } else {
-                                            $healthClass = 'bg-success';
-                                            $healthIcon = 'fa-check-circle';
-                                        }
-                                    ?>
-                                    <div class="equipment-health-icon <?php echo $healthClass; ?>">
-                                        <i class="fas <?php echo $healthIcon; ?>"></i>
-                                    </div>
-                                    <div class="equipment-health-content">
-                                        <h5 class="equipment-health-name"><?php echo htmlspecialchars($equipment['name']); ?></h5>
-                                        <p class="equipment-health-type"><?php echo htmlspecialchars($equipment['type']); ?></p>
-                                        <div class="progress-bar">
-                                            <div class="progress-bar-fill <?php echo $equipment['lifecycle_percentage'] >= 80 ? 'low' : ($equipment['lifecycle_percentage'] >= 50 ? 'medium' : 'high'); ?>" style="width: <?php echo min(100, $equipment['lifecycle_percentage']); ?>%"></div>
-                                        </div>
-                                        <div class="progress-label">
-                                            <span><?php echo $equipment['lifecycle_percentage']; ?>% of lifecycle</span>
-                                            <span><?php echo $equipment['maintenance_count']; ?> services</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Recent Activity -->
-                <div class="grid-col-6">
-                    <div class="activity-list">
-                        <div class="activity-list-header">
-                            <h3>Recent Activity</h3>
-                            <a href="activity.php" class="btn btn-sm">View All</a>
-                        </div>
-                        <div class="activity-list-body">
-                            <?php if (empty($recentActivity)): ?>
-                            <div class="text-center py-4">
-                                <i class="fas fa-history fa-2x mb-3" style="color: var(--primary);"></i>
-                                <p>No recent activity found.</p>
-                            </div>
-                            <?php else: ?>
-                                <?php foreach ($recentActivity as $activity): ?>
-                                <div class="activity-item">
-                                    <?php 
-                                        $activityClass = '';
-                                        switch (strtolower($activity['action'])) {
-                                            case 'added':
-                                                $activityClass = 'bg-success';
-                                                $activityIcon = 'fa-plus';
-                                                break;
-                                            case 'updated':
-                                                $activityClass = 'bg-info';
-                                                $activityIcon = 'fa-edit';
-                                                break;
-                                            case 'removed':
-                                                $activityClass = 'bg-danger';
-                                                $activityIcon = 'fa-trash';
-                                                break;
-                                            case 'maintenance':
-                                                $activityClass = 'bg-warning';
-                                                $activityIcon = 'fa-tools';
-                                                break;
-                                            default:
-                                                $activityClass = 'bg-primary';
-                                                $activityIcon = 'fa-clipboard-list';
-                                        }
-                                    ?>
-                                    <div class="activity-icon <?php echo $activityClass; ?>">
-                                        <i class="fas <?php echo $activityIcon; ?>"></i>
-                                    </div>
-                                    <div class="activity-content">
-                                        <h5 class="activity-title">
-                                            <?php echo htmlspecialchars($activity['action']); ?> 
-                                            <?php echo htmlspecialchars($activity['equipment_name'] ?? 'Equipment'); ?>
-                                        </h5>
-                                        <div class="activity-meta">
-                                            <span><?php echo htmlspecialchars($activity['user_name'] ?? 'System'); ?></span>
-                                            <span class="activity-time"><?php echo getRelativeTime($activity['timestamp']); ?></span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Upcoming Maintenance -->
-                <div class="grid-col-6">
-                    <div class="maintenance-list">
-                        <div class="maintenance-list-header">
-                            <h3>Upcoming Maintenance</h3>
-                            <a href="maintenance.php" class="btn btn-sm">View All</a>
-                        </div>
-                        <div class="maintenance-list-body">
-                            <table class="table">
-                                <thead>
-                                    <tr>
-                                        <th>Equipment</th>
-                                        <th>Date</th>
-                                        <th>Priority</th>
-                                        <th>Status</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($upcomingMaintenance)): ?>
-                                    <tr>
-                                        <td colspan="5" class="text-center">No upcoming maintenance scheduled.</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($upcomingMaintenance as $maintenance): ?>
-                                        <tr>
-                                            <td>
-                                                <div class="d-flex align-items-center">
-                                                    <span class="me-2"><?php echo htmlspecialchars($maintenance['equipment_name']); ?></span>
-                                                    <span class="badge bg-secondary"><?php echo htmlspecialchars($maintenance['equipment_type']); ?></span>
-                                                </div>
-                                            </td>
-                                            <td><?php echo date('M d, Y', strtotime($maintenance['scheduled_date'])); ?></td>
-                                            <td>
-                                                <span class="badge <?php echo getPriorityBadgeClass($maintenance['priority']); ?>"><?php echo htmlspecialchars($maintenance['priority']); ?></span>
-                                            </td>
-                                            <td>
-                                                <span class="badge <?php echo getMaintenanceStatusBadgeClass($maintenance['status'], $maintenance['scheduled_date']); ?>">
-                                                    <?php echo htmlspecialchars($maintenance['status']); ?>
-                                                </span>
-                                            </td>
-                                            <td>
-                                                <div class="action-buttons">
-                                                    <a href="maintenance.php?action=view&id=<?php echo $maintenance['id']; ?>" class="action-btn view" title="View Details">
-                                                        <i class="fas fa-eye"></i>
-                                                    </a>
-                                                    <a href="maintenance.php?action=edit&id=<?php echo $maintenance['id']; ?>" class="action-btn edit" title="Edit">
-                                                        <i class="fas fa-edit"></i>
-                                                    </a>
-                                                    <a href="maintenance.php?action=complete&id=<?php echo $maintenance['id']; ?>" class="action-btn complete" title="Mark Complete">
-                                                        <i class="fas fa-check"></i>
-                                                    </a>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Inventory Alerts -->
-                <div class="grid-col-6">
-                    <div class="inventory-alerts">
-                        <div class="inventory-alerts-header">
-                            <h3>Inventory Alerts</h3>
-                            <a href="inventory.php" class="btn btn-sm">View All</a>
-                        </div>
-                        <div class="inventory-alerts-body">
-                            <table class="table">
-                                <thead>
-                                    <tr>
-                                        <th>Item</th>
-                                        <th>Current Stock</th>
-                                        <th>Min. Required</th>
-                                        <th>Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($inventoryAlerts)): ?>
-                                    <tr>
-                                        <td colspan="4" class="text-center">No inventory alerts at this time.</td>
-                                    </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($inventoryAlerts as $alert): ?>
-                                        <?php 
-                                            $ratio = $alert['quantity'] / $alert['min_quantity'];
-                                            $statusClass = $ratio <= 0.3 ? 'low' : ($ratio <= 0.7 ? 'medium' : 'high');
-                                            $percentage = round($ratio * 100);
-                                        ?>
-                                        <tr>
-                                            <td>
-                                                <div class="d-flex align-items-center">
-                                                    <span class="me-2"><?php echo htmlspecialchars($alert['name']); ?></span>
-                                                    <?php if (isset($alert['category'])): ?>
-                                                    <span class="badge bg-secondary"><?php echo htmlspecialchars($alert['category']); ?></span>
-                                                    <?php endif; ?>
-                                                </div>
-                                            </td>
-                                            <td><?php echo $alert['quantity']; ?></td>
-                                            <td><?php echo $alert['min_quantity']; ?></td>
-                                            <td>
-                                                <div class="progress-bar">
-                                                    <div class="progress-bar-fill <?php echo $statusClass; ?>" style="width: <?php echo min(100, $percentage); ?>%"></div>
-                                                </div>
-                                                <div class="progress-label">
-                                                    <span><?php echo $percentage; ?>% of minimum</span>
-                                                    <a href="inventory.php?action=reorder&id=<?php echo $alert['id']; ?>" class="text-primary">Reorder</a>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Weather Widget for Maintenance Planning -->
-                <div class="grid-col-6">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>Maintenance Planning</h3>
-                        </div>
-                        <div class="card-body">
-                            <div class="weather-widget">
-                                <div class="weather-day">
-                                    <h5>Today</h5>
-                                    <div class="weather-icon">
-                                        <i class="fas fa-<?php echo $weatherData['today']['icon']; ?>"></i>
-                                    </div>
-                                    <div class="weather-temp"><?php echo $weatherData['today']['temp']; ?>°F</div>
-                                    <div class="weather-condition"><?php echo $weatherData['today']['condition']; ?></div>
-                                </div>
-                                <div class="weather-day">
-                                    <h5>Tomorrow</h5>
-                                    <div class="weather-icon">
-                                        <i class="fas fa-<?php echo $weatherData['tomorrow']['icon']; ?>"></i>
-                                    </div>
-                                    <div class="weather-temp"><?php echo $weatherData['tomorrow']['temp']; ?>°F</div>
-                                    <div class="weather-condition"><?php echo $weatherData['tomorrow']['condition']; ?></div>
-                                </div>
-                                <div class="weather-day">
-                                    <h5>Day After</h5>
-                                    <div class="weather-icon">
-                                        <i class="fas fa-<?php echo $weatherData['day_after']['icon']; ?>"></i>
-                                    </div>
-                                    <div class="weather-temp"><?php echo $weatherData['day_after']['temp']; ?>°F</div>
-                                    <div class="weather-condition"><?php echo $weatherData['day_after']['condition']; ?></div>
-                                </div>
-                            </div>
-                            
-                            <!-- Mini Calendar -->
-                            <div class="calendar-widget mt-4">
-                                <div class="calendar-header">
-                                    <h5 class="calendar-title">May 2025</h5>
-                                    <div class="calendar-nav">
-                                        <button class="calendar-nav-btn"><i class="fas fa-chevron-left"></i></button>
-                                        <button class="calendar-nav-btn"><i class="fas fa-chevron-right"></i></button>
-                                    </div>
-                                </div>
-                                <div class="calendar-grid">
-                                    <div class="calendar-day-header">Sun</div>
-                                    <div class="calendar-day-header">Mon</div>
-                                    <div class="calendar-day-header">Tue</div>
-                                    <div class="calendar-day-header">Wed</div>
-                                    <div class="calendar-day-header">Thu</div>
-                                    <div class="calendar-day-header">Fri</div>
-                                    <div class="calendar-day-header">Sat</div>
-                                    
-                                    <!-- Calendar days would be dynamically generated -->
-                                    <div class="calendar-day other-month"><div class="calendar-day-number">31</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">1</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">2</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">3</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">4</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">5</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">6</div></div>
-                                    
-                                    <div class="calendar-day"><div class="calendar-day-number">7</div></div>
-                                    <div class="calendar-day has-events"><div class="calendar-day-number">8</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">9</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">10</div></div>
-                                    <div class="calendar-day has-events"><div class="calendar-day-number">11</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">12</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">13</div></div>
-                                    
-                                    <div class="calendar-day"><div class="calendar-day-number">14</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">15</div></div>
-                                    <div class="calendar-day has-events"><div class="calendar-day-number">16</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">17</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">18</div></div>
-                                    <div class="calendar-day has-events"><div class="calendar-day-number">19</div></div>
-                                    <div class="calendar-day today"><div class="calendar-day-number">20</div></div>
-                                    
-                                    <div class="calendar-day"><div class="calendar-day-number">21</div></div>
-                                    <div class="calendar-day has-events"><div class="calendar-day-number">22</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">23</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">24</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">25</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">26</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">27</div></div>
-                                    
-                                    <div class="calendar-day"><div class="calendar-day-number">28</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">29</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">30</div></div>
-                                    <div class="calendar-day"><div class="calendar-day-number">31</div></div>
-                                    <div class="calendar-day other-month"><div class="calendar-day-number">1</div></div>
-                                    <div class="calendar-day other-month"><div class="calendar-day-number">2</div></div>
-                                    <div class="calendar-day other-month"><div class="calendar-day-number">3</div></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+        </nav>
+    </aside>
     
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <button class="btn btn-outline btn-sm d-md-none" id="sidebar-toggle">
+                    <i class="fas fa-bars"></i>
+                </button>
+                <div>
+                    <h1 class="header-title">Equipment Dashboard</h1>
+                    <p class="header-subtitle">Welcome back, <?php echo htmlspecialchars($userName); ?></p>
+                </div>
+            </div>
+            
+            <div class="header-right">
+                <div class="search-container">
+                    <i class="search-icon fas fa-search"></i>
+                    <input type="text" class="search-input" placeholder="Search equipment, maintenance..." id="global-search">
+                </div>
+                
+                <div class="theme-toggle <?php echo $theme === 'dark' ? 'active' : ''; ?>" id="theme-toggle">
+                    <div class="theme-toggle-slider">
+                        <i class="fas fa-<?php echo $theme === 'dark' ? 'moon' : 'sun'; ?>"></i>
+                    </div>
+                </div>
+                
+                <div class="notification-bell" id="notification-bell">
+                    <i class="fas fa-bell"></i>
+                    <?php if (count($notifications) > 0): ?>
+                    <span class="notification-badge"><?php echo count($notifications); ?></span>
+                    <?php endif; ?>
+                </div>
+                
+                <div class="user-menu">
+                    <img src="https://randomuser.me/api/portraits/men/3.jpg" alt="User Avatar" class="user-avatar" id="user-avatar">
+                </div>
+            </div>
+        </header>
+        
+        <!-- Dashboard Content -->
+        <div class="dashboard-container">
+            <!-- Stats Cards -->
+            <div class="card stat-card">
+                <div class="stat-card-header">
+                    <div class="stat-card-icon bg-success">
+                        <i class="fas fa-check-circle"></i>
+                    </div>
+                </div>
+                <div class="stat-card-value text-success"><?php echo $equipmentStats['available_count'] ?? 0; ?></div>
+                <div class="stat-card-label">Available Equipment</div>
+                <div class="stat-card-change positive">
+                    <i class="fas fa-arrow-up"></i>
+                    <span>+5.2% from last week</span>
+                </div>
+            </div>
+            
+            <div class="card stat-card">
+                <div class="stat-card-header">
+                    <div class="stat-card-icon bg-info">
+                        <i class="fas fa-user-clock"></i>
+                    </div>
+                </div>
+                <div class="stat-card-value text-info"><?php echo $equipmentStats['in_use_count'] ?? 0; ?></div>
+                <div class="stat-card-label">In Use</div>
+                <div class="stat-card-change positive">
+                    <i class="fas fa-arrow-up"></i>
+                    <span>+12.8% from last week</span>
+                </div>
+            </div>
+            
+            <div class="card stat-card">
+                <div class="stat-card-header">
+                    <div class="stat-card-icon bg-warning">
+                        <i class="fas fa-tools"></i>
+                    </div>
+                </div>
+                <div class="stat-card-value text-warning"><?php echo $maintenanceStats['scheduled_count'] ?? 0; ?></div>
+                <div class="stat-card-label">Scheduled Maintenance</div>
+                <div class="stat-card-change">
+                    <i class="fas fa-minus"></i>
+                    <span>No change</span>
+                </div>
+            </div>
+            
+            <div class="card stat-card">
+                <div class="stat-card-header">
+                    <div class="stat-card-icon bg-danger">
+                        <i class="fas fa-exclamation-triangle"></i>
+                    </div>
+                </div>
+                <div class="stat-card-value text-danger"><?php echo $maintenanceStats['overdue_count'] ?? 0; ?></div>
+                <div class="stat-card-label">Overdue Items</div>
+                <div class="stat-card-change negative">
+                    <i class="fas fa-arrow-down"></i>
+                    <span>-2.1% from last week</span>
+                </div>
+            </div>
+            
+            <!-- Enhanced Calendar Widget -->
+            <div class="card calendar-widget">
+                <div class="calendar-header">
+                    <h2 class="calendar-title"><?php echo $currentDate->format('F Y'); ?></h2>
+                    <div class="calendar-nav">
+                        <button class="calendar-nav-btn" id="prev-month">
+                            <i class="fas fa-chevron-left"></i>
+                        </button>
+                        <button class="calendar-nav-btn" id="today-btn">Today</button>
+                        <button class="calendar-nav-btn" id="next-month">
+                            <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="calendar-grid">
+                    <div class="calendar-day-header">Sun</div>
+                    <div class="calendar-day-header">Mon</div>
+                    <div class="calendar-day-header">Tue</div>
+                    <div class="calendar-day-header">Wed</div>
+                    <div class="calendar-day-header">Thu</div>
+                    <div class="calendar-day-header">Fri</div>
+                    <div class="calendar-day-header">Sat</div>
+                    
+                    <?php foreach ($calendarData as $day): ?>
+                    <div class="calendar-day <?php echo !$day['is_current_month'] ? 'other-month' : ''; ?> <?php echo $day['is_today'] ? 'today' : ''; ?>" 
+                         data-date="<?php echo $day['date']; ?>">
+                        <div class="calendar-day-number"><?php echo $day['day']; ?></div>
+                        <?php foreach ($day['events'] as $event): ?>
+                        <div class="calendar-event <?php echo $event['priority'] === 'High' ? 'high-priority' : ''; ?>" 
+                             title="<?php echo htmlspecialchars($event['title']); ?>">
+                            <?php echo htmlspecialchars(substr($event['title'], 0, 20)) . (strlen($event['title']) > 20 ? '...' : ''); ?>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            
+            <!-- Enhanced Weather Widget -->
+            <div class="card weather-widget">
+                <h2 class="chart-title">Weather & Maintenance Planning</h2>
+                
+                <div class="weather-current">
+                    <div class="weather-icon">
+                        <i class="fas fa-<?php echo $weatherData['current']['icon']; ?>"></i>
+                    </div>
+                    <div class="weather-details">
+                        <h3><?php echo $weatherData['current']['temp']; ?>°F</h3>
+                        <p><?php echo $weatherData['current']['condition']; ?></p>
+                        <p>Humidity: <?php echo $weatherData['current']['humidity']; ?>% | Wind: <?php echo $weatherData['current']['wind_speed']; ?> mph</p>
+                        <p class="<?php echo $weatherData['current']['maintenance_suitable'] ? 'text-success' : 'text-warning'; ?>">
+                            <i class="fas fa-<?php echo $weatherData['current']['maintenance_suitable'] ? 'check' : 'exclamation-triangle'; ?>"></i>
+                            <?php echo $weatherData['current']['maintenance_suitable'] ? 'Good for outdoor maintenance' : 'Indoor maintenance recommended'; ?>
+                        </p>
+                    </div>
+                </div>
+                
+                <div class="weather-forecast">
+                    <?php foreach ($weatherData['forecast'] as $forecast): ?>
+                    <div class="weather-day">
+                        <div class="weather-day-icon">
+                            <i class="fas fa-<?php echo $forecast['icon']; ?>"></i>
+                        </div>
+                        <div class="weather-day-temp"><?php echo $forecast['temp']; ?>°F</div>
+                        <div class="weather-day-condition"><?php echo $forecast['condition']; ?></div>
+                        <div class="mt-2">
+                            <span class="badge <?php echo $forecast['maintenance_suitable'] ? 'badge-success' : 'badge-warning'; ?>">
+                                <?php echo $forecast['maintenance_suitable'] ? 'Suitable' : 'Not Ideal'; ?>
+                            </span>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            
+            <!-- Equipment Performance Chart -->
+            <div class="card chart-container">
+                <div class="chart-header">
+                    <h2 class="chart-title">Equipment Usage Analytics</h2>
+                    <div class="chart-controls">
+                        <button class="chart-btn active" data-period="7">7 Days</button>
+                        <button class="chart-btn" data-period="30">30 Days</button>
+                        <button class="chart-btn" data-period="90">90 Days</button>
+                    </div>
+                </div>
+                <canvas id="usageChart" height="300"></canvas>
+            </div>
+            
+            <!-- Maintenance Trends Chart -->
+            <div class="card chart-container">
+                <div class="chart-header">
+                    <h2 class="chart-title">Maintenance Trends</h2>
+                    <div class="chart-controls">
+                        <button class="chart-btn" id="export-chart">
+                            <i class="fas fa-download"></i> Export
+                        </button>
+                    </div>
+                </div>
+                <canvas id="maintenanceChart" height="300"></canvas>
+            </div>
+            
+            <!-- Recent Activity & Upcoming Maintenance -->
+            <div class="card data-table">
+                <div class="chart-header">
+                    <h2 class="chart-title">Recent Activity & Upcoming Maintenance</h2>
+                    <div class="chart-controls">
+                        <button class="chart-btn" id="refresh-data">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <a href="maintenance.php" class="btn btn-primary btn-sm">
+                            <i class="fas fa-plus"></i> Schedule Maintenance
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Equipment</th>
+                                <th>Type</th>
+                                <th>Scheduled Date</th>
+                                <th>Priority</th>
+                                <th>Status</th>
+                                <th>Assigned To</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($upcomingMaintenance)): ?>
+                            <tr>
+                                <td colspan="7" class="text-center" style="padding: 2rem;">
+                                    <i class="fas fa-calendar-check fa-2x text-primary mb-3"></i>
+                                    <p>No upcoming maintenance scheduled.</p>
+                                    <a href="maintenance.php" class="btn btn-primary btn-sm">Schedule Maintenance</a>
+                                </td>
+                            </tr>
+                            <?php else: ?>
+                                <?php foreach ($upcomingMaintenance as $maintenance): ?>
+                                <tr>
+                                    <td>
+                                        <div class="d-flex align-items-center">
+                                            <i class="fas fa-dumbbell text-primary me-2"></i>
+                                            <span class="fw-bold"><?php echo htmlspecialchars($maintenance['equipment_name']); ?></span>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <span class="badge badge-info"><?php echo htmlspecialchars($maintenance['equipment_type']); ?></span>
+                                    </td>
+                                    <td><?php echo date('M d, Y', strtotime($maintenance['scheduled_date'])); ?></td>
+                                    <td>
+                                        <span class="badge badge-<?php echo strtolower($maintenance['priority']); ?>">
+                                            <?php echo htmlspecialchars($maintenance['priority']); ?>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="badge badge-<?php echo getMaintenanceStatusBadgeClass($maintenance['status'], $maintenance['scheduled_date']); ?>">
+                                            <?php echo htmlspecialchars($maintenance['status']); ?>
+                                        </span>
+                                    </td>
+                                    <td><?php echo htmlspecialchars($maintenance['assigned_to'] ?? 'Unassigned'); ?></td>
+                                    <td>
+                                        <div class="d-flex gap-1">
+                                            <a href="maintenance.php?action=view&id=<?php echo $maintenance['id']; ?>" 
+                                               class="btn btn-outline btn-sm" title="View Details">
+                                                <i class="fas fa-eye"></i>
+                                            </a>
+                                            <a href="maintenance.php?action=edit&id=<?php echo $maintenance['id']; ?>" 
+                                               class="btn btn-primary btn-sm" title="Edit">
+                                                <i class="fas fa-edit"></i>
+                                            </a>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <!-- Enhanced JavaScript -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script>
-        // Toggle user dropdown
-        document.getElementById('user-dropdown-toggle').addEventListener('click', function() {
-            document.getElementById('user-dropdown').classList.toggle('show');
-        });
-        
-        // Toggle notification dropdown
-        document.getElementById('notification-bell').addEventListener('click', function(e) {
-            e.stopPropagation();
-            document.getElementById('notification-dropdown').classList.toggle('show');
-            
-            // Close user dropdown if open
-            document.getElementById('user-dropdown').classList.remove('show');
-        });
-        
-        // Toggle sidebar on mobile
-        document.getElementById('sidebar-toggle').addEventListener('click', function() {
-            document.getElementById('sidebar').classList.toggle('expanded');
-        });
-        
-        // Close dropdowns when clicking outside
-        window.addEventListener('click', function(event) {
-            if (!event.target.matches('.dropdown-toggle') && !event.target.matches('.dropdown-toggle *') &&
-                !event.target.matches('.notification-bell') && !event.target.matches('.notification-bell *')) {
+        // Enhanced Dashboard JavaScript
+        class EquipmentDashboard {
+            constructor() {
+                this.currentTheme = '<?php echo $theme; ?>';
+                this.currentMonth = <?php echo $currentMonth; ?>;
+                this.currentYear = <?php echo $currentYear; ?>;
+                this.charts = {};
                 
-                var dropdowns = document.getElementsByClassName('dropdown-menu');
-                for (var i = 0; i < dropdowns.length; i++) {
-                    var openDropdown = dropdowns[i];
-                    if (openDropdown.classList.contains('show')) {
-                        openDropdown.classList.remove('show');
-                    }
-                }
-                
-                var notificationDropdown = document.getElementById('notification-dropdown');
-                if (notificationDropdown.classList.contains('show')) {
-                    notificationDropdown.classList.remove('show');
-                }
+                this.init();
             }
-        });
-        
-        // Theme toggle functionality
-        document.getElementById('theme-toggle').addEventListener('change', function() {
-            const theme = this.checked ? 'dark' : 'light';
             
-            // Save theme preference via AJAX
-            $.ajax({
-                url: 'save-theme.php',
-                type: 'POST',
-                data: { theme: theme },
-                dataType: 'json',
-                success: function(response) {
-                    if (response.success) {
-                        // Toggle body class
-                        document.body.classList.toggle('dark-theme', theme === 'dark');
-                        
-                        // Update charts for the new theme
-                        updateChartsForTheme(theme);
-                    }
+            init() {
+                this.setupEventListeners();
+                this.initializeCharts();
+                this.setupRealTimeUpdates();
+                this.setupNotifications();
+            }
+            
+            setupEventListeners() {
+                // Theme toggle
+                document.getElementById('theme-toggle').addEventListener('click', () => {
+                    this.toggleTheme();
+                });
+                
+                // Sidebar toggle for mobile
+                const sidebarToggle = document.getElementById('sidebar-toggle');
+                if (sidebarToggle) {
+                    sidebarToggle.addEventListener('click', () => {
+                        document.getElementById('sidebar').classList.toggle('open');
+                    });
                 }
-            });
-        });
-        
-        // Function to update chart colors based on theme
-        function updateChartsForTheme(theme) {
-            const isDark = theme === 'dark';
+                
+                // Calendar navigation
+                document.getElementById('prev-month').addEventListener('click', () => {
+                    this.navigateCalendar(-1);
+                });
+                
+                document.getElementById('next-month').addEventListener('click', () => {
+                    this.navigateCalendar(1);
+                });
+                
+                document.getElementById('today-btn').addEventListener('click', () => {
+                    this.goToToday();
+                });
+                
+                // Chart controls
+                document.querySelectorAll('.chart-btn[data-period]').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        this.updateUsageChart(e.target.dataset.period);
+                        document.querySelectorAll('.chart-btn[data-period]').forEach(b => b.classList.remove('active'));
+                        e.target.classList.add('active');
+                    });
+                });
+                
+                // Search functionality
+                document.getElementById('global-search').addEventListener('keyup', (e) => {
+                    if (e.key === 'Enter') {
+                        this.performSearch(e.target.value);
+                    }
+                });
+                
+                // Refresh data
+                const refreshBtn = document.getElementById('refresh-data');
+                if (refreshBtn) {
+                    refreshBtn.addEventListener('click', () => {
+                        this.refreshDashboardData();
+                    });
+                }
+                
+                // Calendar day clicks
+                document.querySelectorAll('.calendar-day').forEach(day => {
+                    day.addEventListener('click', (e) => {
+                        this.showDayDetails(e.currentTarget.dataset.date);
+                    });
+                });
+            }
             
-            // Update text color for all charts
-            Chart.defaults.color = isDark ? '#f5f5f5' : '#666';
-            Chart.defaults.borderColor = isDark ? '#444' : '#eee';
-            
-            // Redraw charts
-            if (window.usageChart) window.usageChart.update();
-            if (window.typeChart) window.typeChart.update();
-            if (window.maintenanceTrendChart) window.maintenanceTrendChart.update();
-        }
-        
-        // Initialize charts
-        document.addEventListener('DOMContentLoaded', function() {
-            const isDarkTheme = document.body.classList.contains('dark-theme');
-            
-            // Set default chart colors based on theme
-            Chart.defaults.color = isDarkTheme ? '#f5f5f5' : '#666';
-            Chart.defaults.borderColor = isDarkTheme ? '#444' : '#eee';
-            
-            // Equipment Usage Chart
-            const usageCtx = document.getElementById('usageChart').getContext('2d');
-            window.usageChart = new Chart(usageCtx, {
-                type: 'line',
-                data: {
-                    labels: <?php echo json_encode($usageDates); ?>,
-                    datasets: [{
-                        label: 'Equipment Usage',
-                        data: <?php echo json_encode($usageCounts); ?>,
-                        backgroundColor: 'rgba(255, 102, 0, 0.2)',
-                        borderColor: 'rgba(255, 102, 0, 1)',
-                        borderWidth: 2,
-                        tension: 0.3,
-                        pointBackgroundColor: 'rgba(255, 102, 0, 1)',
-                        fill: true
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            ticks: {
-                                precision: 0
-                            },
-                            grid: {
-                                display: true,
-                                color: isDarkTheme ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
-                            }
-                        },
-                        x: {
-                            grid: {
-                                display: false
-                            }
-                        }
+            toggleTheme() {
+                const newTheme = this.currentTheme === 'dark' ? 'light' : 'dark';
+                
+                // Update UI immediately
+                document.body.classList.toggle('light-theme', newTheme === 'light');
+                
+                const toggle = document.getElementById('theme-toggle');
+                toggle.classList.toggle('active', newTheme === 'dark');
+                
+                const slider = toggle.querySelector('.theme-toggle-slider i');
+                slider.className = `fas fa-${newTheme === 'dark' ? 'moon' : 'sun'}`;
+                
+                // Save preference
+                fetch('save-theme.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
                     },
-                    plugins: {
-                        legend: {
-                            display: false
+                    body: JSON.stringify({ theme: newTheme })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        this.currentTheme = newTheme;
+                        this.updateChartsForTheme();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error saving theme:', error);
+                });
+            }
+            
+            initializeCharts() {
+                const isDark = this.currentTheme === 'dark';
+                
+                // Set Chart.js defaults for theme
+                Chart.defaults.color = isDark ? '#b3b3b3' : '#666666';
+                Chart.defaults.borderColor = isDark ? '#404040' : '#e0e0e0';
+                Chart.defaults.backgroundColor = isDark ? '#1a1a1a' : '#ffffff';
+                
+                // Usage Chart
+                this.initUsageChart();
+                
+                // Maintenance Chart
+                this.initMaintenanceChart();
+            }
+            
+            initUsageChart() {
+                const ctx = document.getElementById('usageChart').getContext('2d');
+                const isDark = this.currentTheme === 'dark';
+                
+                this.charts.usage = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: <?php echo json_encode(array_column($usageAnalytics, 'date')); ?>,
+                        datasets: [{
+                            label: 'Daily Usage',
+                            data: <?php echo json_encode(array_column($usageAnalytics, 'usage_count')); ?>,
+                            borderColor: '#ff6b35',
+                            backgroundColor: 'rgba(255, 107, 53, 0.1)',
+                            borderWidth: 3,
+                            fill: true,
+                            tension: 0.4,
+                            pointBackgroundColor: '#ff6b35',
+                            pointBorderColor: '#ffffff',
+                            pointBorderWidth: 2,
+                            pointRadius: 6,
+                            pointHoverRadius: 8
+                        }, {
+                            label: 'Unique Equipment',
+                            data: <?php echo json_encode(array_column($usageAnalytics, 'unique_equipment')); ?>,
+                            borderColor: '#ff9500',
+                            backgroundColor: 'rgba(255, 149, 0, 0.1)',
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.4,
+                            pointBackgroundColor: '#ff9500',
+                            pointBorderColor: '#ffffff',
+                            pointBorderWidth: 2,
+                            pointRadius: 4,
+                            pointHoverRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
                         },
-                        tooltip: {
-                            backgroundColor: isDarkTheme ? '#333' : '#fff',
-                            titleColor: isDarkTheme ? '#fff' : '#333',
-                            bodyColor: isDarkTheme ? '#fff' : '#333',
-                            borderColor: isDarkTheme ? '#555' : '#ddd',
-                            borderWidth: 1,
-                            displayColors: false,
-                            callbacks: {
-                                title: function(tooltipItems) {
-                                    return 'Date: ' + tooltipItems[0].label;
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                                labels: {
+                                    usePointStyle: true,
+                                    padding: 20,
+                                    color: isDark ? '#b3b3b3' : '#666666'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: isDark ? '#2d2d2d' : '#ffffff',
+                                titleColor: isDark ? '#ffffff' : '#1a1a1a',
+                                bodyColor: isDark ? '#b3b3b3' : '#666666',
+                                borderColor: isDark ? '#404040' : '#e0e0e0',
+                                borderWidth: 1,
+                                cornerRadius: 8,
+                                displayColors: true,
+                                callbacks: {
+                                    title: function(context) {
+                                        return 'Date: ' + context[0].label;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                grid: {
+                                    display: false
                                 },
-                                label: function(context) {
-                                    return 'Usage Count: ' + context.raw;
+                                ticks: {
+                                    color: isDark ? '#b3b3b3' : '#666666'
+                                }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                grid: {
+                                    color: isDark ? '#404040' : '#e0e0e0'
+                                },
+                                ticks: {
+                                    color: isDark ? '#b3b3b3' : '#666666',
+                                    precision: 0
                                 }
                             }
                         }
                     }
-                }
-            });
+                });
+            }
             
-            // Equipment Type Chart
-            const typeCtx = document.getElementById('typeChart').getContext('2d');
-            window.typeChart = new Chart(typeCtx, {
-                type: 'doughnut',
-                data: {
-                    labels: <?php echo json_encode($typeLabels); ?>,
-                    datasets: [{
-                        data: <?php echo json_encode($typeCounts); ?>,
-                        backgroundColor: [
-                            'rgba(255, 102, 0, 0.8)',
-                            'rgba(54, 162, 235, 0.8)',
-                            'rgba(255, 206, 86, 0.8)',
-                            'rgba(75, 192, 192, 0.8)',
-                            'rgba(153, 102, 255, 0.8)',
-                            'rgba(255, 159, 64, 0.8)'
-                        ],
-                        borderWidth: 1,
-                        borderColor: isDarkTheme ? '#2d2d2d' : '#fff'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'right',
-                            labels: {
-                                padding: 20,
-                                boxWidth: 12,
-                                color: isDarkTheme ? '#f5f5f5' : '#666'
-                            }
-                        },
-                        tooltip: {
-                            backgroundColor: isDarkTheme ? '#333' : '#fff',
-                            titleColor: isDarkTheme ? '#fff' : '#333',
-                            bodyColor: isDarkTheme ? '#fff' : '#333',
-                            borderColor: isDarkTheme ? '#555' : '#ddd',
-                            borderWidth: 1
-                        }
-                    },
-                    cutout: '60%'
-                }
-            });
-            
-            // Toggle chart type
-            document.getElementById('toggle-chart-type').addEventListener('click', function() {
-                const currentType = window.typeChart.config.type;
-                const newType = currentType === 'doughnut' ? 'bar' : 'doughnut';
+            initMaintenanceChart() {
+                const ctx = document.getElementById('maintenanceChart').getContext('2d');
+                const isDark = this.currentTheme === 'dark';
                 
-                window.typeChart.destroy();
+                // Generate sample data for maintenance trends
+                const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'];
+                const scheduledData = [12, 15, 8, 20, 18, 14];
+                const completedData = [10, 13, 7, 18, 16, 12];
+                const overdueData = [2, 2, 1, 2, 2, 2];
                 
-                window.typeChart = new Chart(typeCtx, {
-                    type: newType,
+                this.charts.maintenance = new Chart(ctx, {
+                    type: 'bar',
                     data: {
-                        labels: <?php echo json_encode($typeLabels); ?>,
+                        labels: months,
                         datasets: [{
-                            data: <?php echo json_encode($typeCounts); ?>,
-                            backgroundColor: [
-                                'rgba(255, 102, 0, 0.8)',
-                                'rgba(54, 162, 235, 0.8)',
-                                'rgba(255, 206, 86, 0.8)',
-                                'rgba(75, 192, 192, 0.8)',
-                                'rgba(153, 102, 255, 0.8)',
-                                'rgba(255, 159, 64, 0.8)'
-                            ],
+                            label: 'Scheduled',
+                            data: scheduledData,
+                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                            borderColor: '#3b82f6',
                             borderWidth: 1,
-                            borderColor: isDarkTheme ? '#2d2d2d' : '#fff'
+                            borderRadius: 6,
+                            borderSkipped: false
+                        }, {
+                            label: 'Completed',
+                            data: completedData,
+                            backgroundColor: 'rgba(16, 185, 129, 0.8)',
+                            borderColor: '#10b981',
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            borderSkipped: false
+                        }, {
+                            label: 'Overdue',
+                            data: overdueData,
+                            backgroundColor: 'rgba(239, 68, 68, 0.8)',
+                            borderColor: '#ef4444',
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            borderSkipped: false
                         }]
                     },
                     options: {
@@ -3129,192 +1849,305 @@ function getRelativeTime($timestamp) {
                         maintainAspectRatio: false,
                         plugins: {
                             legend: {
-                                position: newType === 'doughnut' ? 'right' : 'top',
-                                display: newType === 'doughnut',
+                                position: 'top',
                                 labels: {
+                                    usePointStyle: true,
                                     padding: 20,
-                                    boxWidth: 12,
-                                    color: isDarkTheme ? '#f5f5f5' : '#666'
+                                    color: isDark ? '#b3b3b3' : '#666666'
                                 }
                             },
                             tooltip: {
-                                backgroundColor: isDarkTheme ? '#333' : '#fff',
-                                titleColor: isDarkTheme ? '#fff' : '#333',
-                                bodyColor: isDarkTheme ? '#fff' : '#333',
-                                borderColor: isDarkTheme ? '#555' : '#ddd',
-                                borderWidth: 1
+                                backgroundColor: isDark ? '#2d2d2d' : '#ffffff',
+                                titleColor: isDark ? '#ffffff' : '#1a1a1a',
+                                bodyColor: isDark ? '#b3b3b3' : '#666666',
+                                borderColor: isDark ? '#404040' : '#e0e0e0',
+                                borderWidth: 1,
+                                cornerRadius: 8
                             }
                         },
-                        cutout: newType === 'doughnut' ? '60%' : 0,
                         scales: {
-                            y: {
-                                display: newType === 'bar',
-                                beginAtZero: true,
-                                ticks: {
-                                    precision: 0
-                                },
-                                grid: {
-                                    display: true,
-                                    color: isDarkTheme ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
-                                }
-                            },
                             x: {
-                                display: newType === 'bar',
                                 grid: {
                                     display: false
+                                },
+                                ticks: {
+                                    color: isDark ? '#b3b3b3' : '#666666'
+                                }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                grid: {
+                                    color: isDark ? '#404040' : '#e0e0e0'
+                                },
+                                ticks: {
+                                    color: isDark ? '#b3b3b3' : '#666666',
+                                    precision: 0
                                 }
                             }
                         }
                     }
                 });
-            });
+            }
             
-            // Maintenance Trend Chart
-            const maintenanceTrendCtx = document.getElementById('maintenanceTrendChart').getContext('2d');
-            window.maintenanceTrendChart = new Chart(maintenanceTrendCtx, {
-                type: 'bar',
-                data: {
-                    labels: <?php echo json_encode($maintenanceTrendLabels); ?>,
-                    datasets: [
-                        {
-                            label: 'Scheduled',
-                            data: <?php echo json_encode($scheduledData); ?>,
-                            backgroundColor: 'rgba(23, 162, 184, 0.8)',
-                            borderColor: 'rgba(23, 162, 184, 1)',
-                            borderWidth: 1
-                        },
-                        {
-                            label: 'Completed',
-                            data: <?php echo json_encode($completedData); ?>,
-                            backgroundColor: 'rgba(40, 167, 69, 0.8)',
-                            borderColor: 'rgba(40, 167, 69, 1)',
-                            borderWidth: 1
-                        },
-                        {
-                            label: 'Overdue',
-                            data: <?php echo json_encode($overdueData); ?>,
-                            backgroundColor: 'rgba(220, 53, 69, 0.8)',
-                            borderColor: 'rgba(220, 53, 69, 1)',
-                            borderWidth: 1
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            stacked: false,
-                            ticks: {
-                                precision: 0
-                            },
-                            grid: {
-                                display: true,
-                                color: isDarkTheme ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
-                            }
-                        },
-                        x: {
-                            grid: {
-                                display: false
-                            }
-                        }
-                    },
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            backgroundColor: isDarkTheme ? '#333' : '#fff',
-                            titleColor: isDarkTheme ? '#fff' : '#333',
-                            bodyColor: isDarkTheme ? '#fff' : '#333',
-                            borderColor: isDarkTheme ? '#555' : '#ddd',
-                            borderWidth: 1
-                        }
-                    }
-                }
-            });
-            
-            // Refresh usage chart
-            document.getElementById('refresh-usage-chart').addEventListener('click', function() {
-                this.disabled = true;
-                this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+            updateChartsForTheme() {
+                const isDark = this.currentTheme === 'dark';
                 
-                // Simulate AJAX request
-                setTimeout(() => {
-                    // Random data for demo
-                    const newData = Array.from({length: window.usageChart.data.labels.length}, () => 
-                        Math.floor(Math.random() * 50) + 10
-                    );
-                    
-                    window.usageChart.data.datasets[0].data = newData;
-                    window.usageChart.update();
-                    
-                    this.disabled = false;
-                    this.innerHTML = '<i class="fas fa-sync-alt"></i> Refresh';
-                }, 1000);
-            });
-            
-            // Change maintenance chart period
-            document.getElementById('maintenance-chart-period').addEventListener('change', function() {
-                const period = parseInt(this.value);
+                // Update Chart.js defaults
+                Chart.defaults.color = isDark ? '#b3b3b3' : '#666666';
+                Chart.defaults.borderColor = isDark ? '#404040' : '#e0e0e0';
                 
-                // Simulate AJAX request for different periods
-                // In a real app, you would fetch new data from the server
-                setTimeout(() => {
-                    // Random data for demo
-                    const labels = [];
-                    const scheduled = [];
-                    const completed = [];
-                    const overdue = [];
-                    
-                    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-                    const currentDate = new Date();
-                    
-                    for (let i = period - 1; i >= 0; i--) {
-                        const d = new Date(currentDate);
-                        d.setMonth(d.getMonth() - i);
-                        labels.push(months[d.getMonth()] + ' ' + d.getFullYear());
+                // Update existing charts
+                Object.values(this.charts).forEach(chart => {
+                    if (chart && chart.options) {
+                        // Update legend colors
+                        if (chart.options.plugins && chart.options.plugins.legend) {
+                            chart.options.plugins.legend.labels.color = isDark ? '#b3b3b3' : '#666666';
+                        }
                         
-                        scheduled.push(Math.floor(Math.random() * 20) + 5);
-                        completed.push(Math.floor(Math.random() * 15) + 3);
-                        overdue.push(Math.floor(Math.random() * 8));
+                        // Update tooltip colors
+                        if (chart.options.plugins && chart.options.plugins.tooltip) {
+                            chart.options.plugins.tooltip.backgroundColor = isDark ? '#2d2d2d' : '#ffffff';
+                            chart.options.plugins.tooltip.titleColor = isDark ? '#ffffff' : '#1a1a1a';
+                            chart.options.plugins.tooltip.bodyColor = isDark ? '#b3b3b3' : '#666666';
+                            chart.options.plugins.tooltip.borderColor = isDark ? '#404040' : '#e0e0e0';
+                        }
+                        
+                        // Update scale colors
+                        if (chart.options.scales) {
+                            Object.values(chart.options.scales).forEach(scale => {
+                                if (scale.ticks) {
+                                    scale.ticks.color = isDark ? '#b3b3b3' : '#666666';
+                                }
+                                if (scale.grid) {
+                                    scale.grid.color = isDark ? '#404040' : '#e0e0e0';
+                                }
+                            });
+                        }
+                        
+                        chart.update();
                     }
-                    
-                    window.maintenanceTrendChart.data.labels = labels;
-                    window.maintenanceTrendChart.data.datasets[0].data = scheduled;
-                    window.maintenanceTrendChart.data.datasets[1].data = completed;
-                    window.maintenanceTrendChart.data.datasets[2].data = overdue;
-                    window.maintenanceTrendChart.update();
-                }, 300);
-            });
+                });
+            }
             
-            // Global search functionality
-            document.getElementById('global-search').addEventListener('keyup', function(e) {
-                if (e.key === 'Enter') {
-                    const searchTerm = this.value.trim();
-                    if (searchTerm) {
-                        // Redirect to search results page
-                        window.location.href = `search.php?q=${encodeURIComponent(searchTerm)}`;
-                    }
+            navigateCalendar(direction) {
+                this.currentMonth += direction;
+                
+                if (this.currentMonth > 12) {
+                    this.currentMonth = 1;
+                    this.currentYear++;
+                } else if (this.currentMonth < 1) {
+                    this.currentMonth = 12;
+                    this.currentYear--;
                 }
+                
+                this.updateCalendar();
+            }
+            
+            goToToday() {
+                const today = new Date();
+                this.currentMonth = today.getMonth() + 1;
+                this.currentYear = today.getFullYear();
+                this.updateCalendar();
+            }
+            
+            updateCalendar() {
+                // Update calendar title
+                const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                    'July', 'August', 'September', 'October', 'November', 'December'];
+                document.querySelector('.calendar-title').textContent = 
+                    `${monthNames[this.currentMonth - 1]} ${this.currentYear}`;
+                
+                // Fetch new calendar data via AJAX
+                fetch(`get-calendar-data.php?month=${this.currentMonth}&year=${this.currentYear}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        this.renderCalendar(data);
+                    })
+                    .catch(error => {
+                        console.error('Error fetching calendar data:', error);
+                    });
+            }
+            
+            renderCalendar(calendarData) {
+                const calendarGrid = document.querySelector('.calendar-grid');
+                const dayHeaders = calendarGrid.querySelectorAll('.calendar-day-header');
+                
+                // Remove existing day elements
+                calendarGrid.querySelectorAll('.calendar-day').forEach(el => el.remove());
+                
+                // Add new day elements
+                calendarData.forEach(day => {
+                    const dayElement = document.createElement('div');
+                    dayElement.className = `calendar-day ${!day.is_current_month ? 'other-month' : ''} ${day.is_today ? 'today' : ''}`;
+                    dayElement.dataset.date = day.date;
+                    
+                    dayElement.innerHTML = `
+                        <div class="calendar-day-number">${day.day}</div>
+                        ${day.events.map(event => `
+                            <div class="calendar-event ${event.priority === 'High' ? 'high-priority' : ''}" 
+                                 title="${event.title}">
+                                ${event.title.length > 20 ? event.title.substring(0, 20) + '...' : event.title}
+                            </div>
+                        `).join('')}
+                    `;
+                    
+                    dayElement.addEventListener('click', () => {
+                        this.showDayDetails(day.date);
+                    });
+                    
+                    calendarGrid.appendChild(dayElement);
+                });
+            }
+            
+            showDayDetails(date) {
+                // Show modal or sidebar with day details
+                console.log('Show details for date:', date);
+                // Implementation for showing day details would go here
+            }
+            
+            updateUsageChart(period) {
+                // Fetch new data for the selected period
+                fetch(`get-usage-data.php?period=${period}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        this.charts.usage.data.labels = data.labels;
+                        this.charts.usage.data.datasets[0].data = data.usage_count;
+                        this.charts.usage.data.datasets[1].data = data.unique_equipment;
+                        this.charts.usage.update();
+                    })
+                    .catch(error => {
+                        console.error('Error fetching usage data:', error);
+                    });
+            }
+            
+            performSearch(query) {
+                if (query.trim()) {
+                    window.location.href = `search.php?q=${encodeURIComponent(query)}`;
+                }
+            }
+            
+            refreshDashboardData() {
+                const refreshBtn = document.getElementById('refresh-data');
+                const originalText = refreshBtn.innerHTML;
+                
+                refreshBtn.innerHTML = '<div class="spinner"></div> Refreshing...';
+                refreshBtn.disabled = true;
+                
+                // Simulate data refresh
+                setTimeout(() => {
+                    location.reload();
+                }, 1500);
+            }
+            
+            setupRealTimeUpdates() {
+                // Set up periodic updates for real-time data
+                setInterval(() => {
+                    this.updateNotificationCount();
+                    this.updateQuickStats();
+                }, 30000); // Update every 30 seconds
+            }
+            
+            updateNotificationCount() {
+                fetch('get-notification-count.php')
+                    .then(response => response.json())
+                    .then(data => {
+                        const badge = document.querySelector('.notification-badge');
+                        if (data.count > 0) {
+                            if (!badge) {
+                                const bell = document.getElementById('notification-bell');
+                                const newBadge = document.createElement('span');
+                                newBadge.className = 'notification-badge';
+                                newBadge.textContent = data.count;
+                                bell.appendChild(newBadge);
+                            } else {
+                                badge.textContent = data.count;
+                            }
+                        } else if (badge) {
+                            badge.remove();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error updating notification count:', error);
+                    });
+            }
+            
+            updateQuickStats() {
+                fetch('get-quick-stats.php')
+                    .then(response => response.json())
+                    .then(data => {
+                        // Update stat cards with new data
+                        document.querySelectorAll('.stat-card-value').forEach((element, index) => {
+                            if (data.stats && data.stats[index]) {
+                                element.textContent = data.stats[index].value;
+                            }
+                        });
+                    })
+                    .catch(error => {
+                        console.error('Error updating quick stats:', error);
+                    });
+            }
+            
+            setupNotifications() {
+                // Set up notification dropdown functionality
+                const notificationBell = document.getElementById('notification-bell');
+                const notificationDropdown = document.getElementById('notification-dropdown');
+                
+                if (notificationBell && notificationDropdown) {
+                    notificationBell.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        notificationDropdown.classList.toggle('show');
+                    });
+                    
+                    // Close dropdown when clicking outside
+                    document.addEventListener('click', (e) => {
+                        if (!notificationBell.contains(e.target)) {
+                            notificationDropdown.classList.remove('show');
+                        }
+                    });
+                }
+            }
+        }
+        
+        // Initialize dashboard when DOM is loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            window.dashboard = new EquipmentDashboard();
+            
+            // Add smooth scrolling for anchor links
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const target = document.querySelector(this.getAttribute('href'));
+                    if (target) {
+                        target.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
             });
             
-            // Initialize circular progress animations
-            const circularProgressElements = document.querySelectorAll('.circular-progress');
-            circularProgressElements.forEach(element => {
-                const value = parseInt(element.getAttribute('data-value'));
-                const circle = element.querySelector('.progress');
-                const radius = circle.r.baseVal.value;
-                const circumference = 2 * Math.PI * radius;
-                
-                circle.style.strokeDasharray = `${circumference} ${circumference}`;
-                circle.style.strokeDashoffset = circumference;
-                
-                const offset = circumference - (value / 100) * circumference;
-                circle.style.strokeDashoffset = offset;
+            // Add loading states for buttons
+            document.querySelectorAll('.btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    if (this.type === 'submit' || this.dataset.loading === 'true') {
+                        const originalText = this.innerHTML;
+                        this.innerHTML = '<div class="spinner"></div> Loading...';
+                        this.disabled = true;
+                        
+                        // Re-enable after 3 seconds (adjust as needed)
+                        setTimeout(() => {
+                            this.innerHTML = originalText;
+                            this.disabled = false;
+                        }, 3000);
+                    }
+                });
             });
         });
+        
+        // Export functions for global access
+        window.toggleTheme = () => window.dashboard.toggleTheme();
+        window.refreshData = () => window.dashboard.refreshDashboardData();
+        window.navigateCalendar = (direction) => window.dashboard.navigateCalendar(direction);
     </script>
 </body>
 </html>
