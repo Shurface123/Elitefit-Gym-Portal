@@ -714,7 +714,7 @@ unset($_SESSION['error_message']);
            <p style="margin-bottom: 20px; color: var(--text-color);">Are you sure you want to delete <span id="deleteUserName"></span>? This action cannot be undone.</p>
            <div style="display: flex; justify-content: flex-end; gap: 10px;">
                <button onclick="closeDeleteModal()" class="btn btn-sm" style="background-color: var(--secondary);">Cancel</button>
-               <form id="deleteForm" action="delete-user.php" method="post">
+               <form id="deleteForm" action="delete-archived-user.php" method="post">
                    <input type="hidden" id="deleteUserId" name="user_id">
                    <button type="submit" class="btn btn-sm btn-danger">Delete</button>
                </form>

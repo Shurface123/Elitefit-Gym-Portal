@@ -483,14 +483,14 @@ unset($_SESSION['register_error']);
                     
                     <div class="form-row">
                         <div class="form-group">
-                            <label for="member_name">Full Name *</label>
+                            <label for="member_name">Full Name </label>
                             <i class="fas fa-user icon"></i>
                             <input type="text" id="member_name" name="name" placeholder="Enter your full name" required>
                             <div class="error-message" id="name-error"></div>
                         </div>
                         
                         <div class="form-group">
-                            <label for="member_email">Email Address *</label>
+                            <label for="member_email">Email Address </label>
                             <i class="fas fa-envelope icon"></i>
                             <input type="email" id="member_email" name="email" placeholder="Enter your email" required>
                             <div class="error-message" id="email-error"></div>
@@ -499,7 +499,7 @@ unset($_SESSION['register_error']);
                     
                     <div class="form-row">
                         <div class="form-group">
-                            <label for="member_contact">Contact Number *</label>
+                            <label for="member_contact">Contact Number </label>
                             <i class="fas fa-phone icon"></i>
                             <input type="tel" id="member_contact" name="contact_number" placeholder="Enter 10-digit phone number" maxlength="10" required>
                             <div class="contact-format">Format: 10 digits only (e.g., 1234567890)</div>
@@ -508,7 +508,7 @@ unset($_SESSION['register_error']);
                         </div>
                         
                         <div class="form-group">
-                            <label for="member_dob">Date of Birth *</label>
+                            <label for="member_dob">Date of Birth </label>
                             <i class="fas fa-calendar icon"></i>
                             <input type="date" id="member_dob" name="date_of_birth" required>
                             <div class="age-display" id="age-display"></div>
@@ -519,14 +519,14 @@ unset($_SESSION['register_error']);
                     
                     <div class="form-row">
                         <div class="form-group">
-                            <label for="member_password">Password *</label>
+                            <label for="member_password">Password </label>
                             <i class="fas fa-lock icon"></i>
                             <input type="password" id="member_password" name="password" placeholder="Create a password" required>
                             <div class="error-message" id="password-error"></div>
                         </div>
                         
                         <div class="form-group">
-                            <label for="member_confirm_password">Confirm Password *</label>
+                            <label for="member_confirm_password">Confirm Password </label>
                             <i class="fas fa-lock icon"></i>
                             <input type="password" id="member_confirm_password" name="confirm_password" placeholder="Confirm your password" required>
                             <div class="error-message" id="confirm-password-error"></div>
@@ -562,7 +562,7 @@ unset($_SESSION['register_error']);
                         </div>
                         
                         <div class="form-group">
-                            <label for="member_experience">Experience Level *</label>
+                            <label for="member_experience">Experience Level </label>
                             <select id="member_experience" name="experience_level" required>
                                 <option value="">Select your experience level...</option>
                                 <option value="beginner">Beginner (0-6 months)</option>

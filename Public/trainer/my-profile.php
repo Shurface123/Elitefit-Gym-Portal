@@ -51,13 +51,45 @@ try {
     // Use default theme
 }
 
+// Function to check if column exists in table
+function columnExists($conn, $tableName, $columnName) {
+    try {
+        $stmt = $conn->prepare("
+            SELECT COUNT(*) as count 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = DATABASE() 
+            AND TABLE_NAME = ? 
+            AND COLUMN_NAME = ?
+        ");
+        $stmt->execute([$tableName, $columnName]);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $result['count'] > 0;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+// Function to add updated_at column if it doesn't exist
+function ensureUpdatedAtColumn($conn, $tableName) {
+    if (!columnExists($conn, $tableName, 'updated_at')) {
+        try {
+            $conn->exec("ALTER TABLE `$tableName` ADD COLUMN `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+            return true;
+        } catch (PDOException $e) {
+            error_log("Failed to add updated_at column to $tableName: " . $e->getMessage());
+            return false;
+        }
+    }
+    return true;
+}
+
 // Handle profile updates
 $updateMessage = '';
 $updateError = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
     try {
-        // Ensure trainer_profiles table exists
+        // Ensure trainer_profiles table exists with proper structure
         $conn->exec("CREATE TABLE IF NOT EXISTS trainer_profiles (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id INT NOT NULL UNIQUE,
@@ -66,123 +98,323 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
             certification TEXT,
             bio TEXT,
             hourly_rate DECIMAL(10,2),
-            profile_image VARCHAR(255),
+            profile_image VARCHAR(500),
             social_media JSON,
             availability JSON,
             languages JSON,
             achievements JSON,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )");
         
-        $name = $_POST['name'];
-        $email = $_POST['email'];
-        $phone = $_POST['phone'] ?? '';
-        $specialization = $_POST['specialization'] ?? '';
-        $experienceYears = $_POST['experience_years'] ?? null;
-        $certification = $_POST['certification'] ?? '';
-        $bio = $_POST['bio'] ?? '';
-        $hourlyRate = $_POST['hourly_rate'] ?? null;
+        $name = trim($_POST['name']);
+        $email = trim($_POST['email']);
+        $phone = trim($_POST['phone'] ?? '');
+        $specialization = trim($_POST['specialization'] ?? '');
+        $experienceYears = !empty($_POST['experience_years']) ? (int)$_POST['experience_years'] : null;
+        $certification = trim($_POST['certification'] ?? '');
+        $bio = trim($_POST['bio'] ?? '');
+        $hourlyRate = !empty($_POST['hourly_rate']) ? (float)$_POST['hourly_rate'] : null;
         
-        // Handle social media
+        // Handle social media with proper validation
         $socialMedia = json_encode([
-            'instagram' => $_POST['instagram'] ?? '',
-            'facebook' => $_POST['facebook'] ?? '',
-            'linkedin' => $_POST['linkedin'] ?? '',
-            'youtube' => $_POST['youtube'] ?? ''
+            'instagram' => filter_var(trim($_POST['instagram'] ?? ''), FILTER_SANITIZE_URL),
+            'facebook' => filter_var(trim($_POST['facebook'] ?? ''), FILTER_SANITIZE_URL),
+            'linkedin' => filter_var(trim($_POST['linkedin'] ?? ''), FILTER_SANITIZE_URL),
+            'youtube' => filter_var(trim($_POST['youtube'] ?? ''), FILTER_SANITIZE_URL)
         ]);
         
-        // Handle languages
-        $languages = json_encode(array_filter(explode(',', $_POST['languages'] ?? '')));
+        // Handle languages with proper parsing
+        $languagesInput = trim($_POST['languages'] ?? '');
+        $languages = json_encode(array_filter(array_map('trim', explode(',', $languagesInput))));
         
-        // Handle achievements
-        $achievements = json_encode(array_filter(explode(',', $_POST['achievements'] ?? '')));
+        // Handle achievements with proper parsing
+        $achievementsInput = trim($_POST['achievements'] ?? '');
+        $achievements = json_encode(array_filter(array_map('trim', explode(',', $achievementsInput))));
         
-        // Handle availability
+        // Handle availability with validation
         $availability = json_encode([
-            'monday' => ['start' => $_POST['monday_start'] ?? '', 'end' => $_POST['monday_end'] ?? ''],
-            'tuesday' => ['start' => $_POST['tuesday_start'] ?? '', 'end' => $_POST['tuesday_end'] ?? ''],
-            'wednesday' => ['start' => $_POST['wednesday_start'] ?? '', 'end' => $_POST['wednesday_end'] ?? ''],
-            'thursday' => ['start' => $_POST['thursday_start'] ?? '', 'end' => $_POST['thursday_end'] ?? ''],
-            'friday' => ['start' => $_POST['friday_start'] ?? '', 'end' => $_POST['friday_end'] ?? ''],
-            'saturday' => ['start' => $_POST['saturday_start'] ?? '', 'end' => $_POST['saturday_end'] ?? ''],
-            'sunday' => ['start' => $_POST['sunday_start'] ?? '', 'end' => $_POST['sunday_end'] ?? '']
+            'monday' => [
+                'start' => trim($_POST['monday_start'] ?? ''), 
+                'end' => trim($_POST['monday_end'] ?? '')
+            ],
+            'tuesday' => [
+                'start' => trim($_POST['tuesday_start'] ?? ''), 
+                'end' => trim($_POST['tuesday_end'] ?? '')
+            ],
+            'wednesday' => [
+                'start' => trim($_POST['wednesday_start'] ?? ''), 
+                'end' => trim($_POST['wednesday_end'] ?? '')
+            ],
+            'thursday' => [
+                'start' => trim($_POST['thursday_start'] ?? ''), 
+                'end' => trim($_POST['thursday_end'] ?? '')
+            ],
+            'friday' => [
+                'start' => trim($_POST['friday_start'] ?? ''), 
+                'end' => trim($_POST['friday_end'] ?? '')
+            ],
+            'saturday' => [
+                'start' => trim($_POST['saturday_start'] ?? ''), 
+                'end' => trim($_POST['saturday_end'] ?? '')
+            ],
+            'sunday' => [
+                'start' => trim($_POST['sunday_start'] ?? ''), 
+                'end' => trim($_POST['sunday_end'] ?? '')
+            ]
         ]);
         
-        // Handle profile image upload
-        $profileImage = '';
+        // Handle profile image upload with improved error handling
+        $profileImage = null;
+        $currentProfileImage = '';
+        
+        // Get current profile image first
+        $stmt = $conn->prepare("SELECT profile_image FROM trainer_profiles WHERE user_id = ?");
+        $stmt->execute([$userId]);
+        $currentProfile = $stmt->fetch(PDO::FETCH_ASSOC);
+        $currentProfileImage = $currentProfile['profile_image'] ?? '';
+        
         if (isset($_FILES['profile_image']) && $_FILES['profile_image']['error'] === UPLOAD_ERR_OK) {
-            $uploadDir = '../uploads/profiles/';
+            $uploadDir = __DIR__ . '/../uploads/profiles/';
+            
+            // Create directory if it doesn't exist
             if (!is_dir($uploadDir)) {
-                mkdir($uploadDir, 0755, true);
+                if (!mkdir($uploadDir, 0755, true)) {
+                    throw new Exception("Failed to create upload directory");
+                }
             }
             
-            $fileExtension = pathinfo($_FILES['profile_image']['name'], PATHINFO_EXTENSION);
+            // Validate file type
+            $allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            $fileType = $_FILES['profile_image']['type'];
+            
+            if (!in_array($fileType, $allowedTypes)) {
+                throw new Exception("Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed.");
+            }
+            
+            // Validate file size (max 5MB)
+            if ($_FILES['profile_image']['size'] > 5 * 1024 * 1024) {
+                throw new Exception("File size too large. Maximum 5MB allowed.");
+            }
+            
+            $fileExtension = strtolower(pathinfo($_FILES['profile_image']['name'], PATHINFO_EXTENSION));
             $fileName = 'trainer_' . $userId . '_' . time() . '.' . $fileExtension;
             $uploadPath = $uploadDir . $fileName;
             
+            // Delete old profile image if it exists
+            if (!empty($currentProfileImage)) {
+                $oldImagePath = __DIR__ . '/../' . $currentProfileImage;
+                if (file_exists($oldImagePath)) {
+                    unlink($oldImagePath);
+                }
+            }
+            
             if (move_uploaded_file($_FILES['profile_image']['tmp_name'], $uploadPath)) {
                 $profileImage = 'uploads/profiles/' . $fileName;
+                
+                // Verify the uploaded file exists and is readable
+                if (!file_exists($uploadPath) || !is_readable($uploadPath)) {
+                    throw new Exception("Failed to verify uploaded file");
+                }
+            } else {
+                throw new Exception("Failed to upload profile image");
             }
+        } else {
+            // Keep existing profile image if no new one is uploaded
+            $profileImage = $currentProfileImage;
         }
         
-        // Update users table
-        $stmt = $conn->prepare("UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?");
-        $stmt->execute([$name, $email, $phone, $userId]);
+        // Begin transaction for data consistency
+        $conn->beginTransaction();
         
-        // Update trainer_profiles table
-        $profileUpdateQuery = "
-            INSERT INTO trainer_profiles 
-            (user_id, specialization, experience_years, certification, bio, hourly_rate, social_media, availability, languages, achievements" . 
-            ($profileImage ? ", profile_image" : "") . ") 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?" . ($profileImage ? ", ?" : "") . ")
-            ON DUPLICATE KEY UPDATE 
-            specialization = VALUES(specialization),
-            experience_years = VALUES(experience_years),
-            certification = VALUES(certification),
-            bio = VALUES(bio),
-            hourly_rate = VALUES(hourly_rate),
-            social_media = VALUES(social_media),
-            availability = VALUES(availability),
-            languages = VALUES(languages),
-            achievements = VALUES(achievements)" .
-            ($profileImage ? ", profile_image = VALUES(profile_image)" : "");
-        
-        $params = [$userId, $specialization, $experienceYears, $certification, $bio, $hourlyRate, $socialMedia, $availability, $languages, $achievements];
-        if ($profileImage) {
-            $params[] = $profileImage;
+        try {
+            // Check if updated_at column exists in users table and add if necessary
+            $hasUpdatedAt = ensureUpdatedAtColumn($conn, 'users');
+            
+            // Update users table - build query dynamically based on available columns
+            $userUpdateFields = ['name = ?', 'email = ?'];
+            $userUpdateValues = [$name, $email];
+            
+            // Add phone if it's provided
+            if (!empty($phone)) {
+                $userUpdateFields[] = 'phone = ?';
+                $userUpdateValues[] = $phone;
+            }
+            
+            // Add updated_at if column exists
+            if ($hasUpdatedAt) {
+                $userUpdateFields[] = 'updated_at = CURRENT_TIMESTAMP';
+            }
+            
+            // Add user ID for WHERE clause
+            $userUpdateValues[] = $userId;
+            
+            $userUpdateQuery = "UPDATE users SET " . implode(', ', $userUpdateFields) . " WHERE id = ?";
+            $stmt = $conn->prepare($userUpdateQuery);
+            $stmt->execute($userUpdateValues);
+            
+            // Check if trainer profile exists
+            $stmt = $conn->prepare("SELECT id FROM trainer_profiles WHERE user_id = ?");
+            $stmt->execute([$userId]);
+            $profileExists = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($profileExists) {
+                // Update existing profile
+                $updateQuery = "UPDATE trainer_profiles SET 
+                    specialization = ?, 
+                    experience_years = ?, 
+                    certification = ?, 
+                    bio = ?, 
+                    hourly_rate = ?, 
+                    social_media = ?, 
+                    availability = ?, 
+                    languages = ?, 
+                    achievements = ?, 
+                    updated_at = CURRENT_TIMESTAMP";
+                
+                $params = [$specialization, $experienceYears, $certification, $bio, $hourlyRate, $socialMedia, $availability, $languages, $achievements];
+                
+                if ($profileImage !== null) {
+                    $updateQuery .= ", profile_image = ?";
+                    $params[] = $profileImage;
+                }
+                
+                $updateQuery .= " WHERE user_id = ?";
+                $params[] = $userId;
+                
+                $stmt = $conn->prepare($updateQuery);
+                $stmt->execute($params);
+            } else {
+                // Insert new profile
+                $insertQuery = "INSERT INTO trainer_profiles 
+                    (user_id, specialization, experience_years, certification, bio, hourly_rate, profile_image, social_media, availability, languages, achievements) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                
+                $stmt = $conn->prepare($insertQuery);
+                $stmt->execute([$userId, $specialization, $experienceYears, $certification, $bio, $hourlyRate, $profileImage, $socialMedia, $availability, $languages, $achievements]);
+            }
+            
+            // Commit transaction
+            $conn->commit();
+            
+            $updateMessage = 'Profile updated successfully!';
+            
+            // Refresh the page to show updated data
+            header("Location: my-profile.php?updated=1");
+            exit;
+            
+        } catch (Exception $e) {
+            $conn->rollback();
+            throw $e;
         }
         
-        $stmt = $conn->prepare($profileUpdateQuery);
-        $stmt->execute($params);
-        
-        $updateMessage = 'Profile updated successfully!';
-    } catch (PDOException $e) {
+    } catch (Exception $e) {
         $updateError = 'Error updating profile: ' . $e->getMessage();
+        error_log("Profile update error for user $userId: " . $e->getMessage());
     }
 }
 
-// Get trainer profile data
-$stmt = $conn->prepare("
-    SELECT u.*, tp.specialization, tp.experience_years, tp.certification, tp.bio, 
-           tp.hourly_rate, tp.profile_image, tp.social_media, tp.availability, 
-           tp.languages, tp.achievements,
-           tp.availability_monday, tp.availability_tuesday, tp.availability_wednesday,
-           tp.availability_thursday, tp.availability_friday, tp.availability_saturday,
-           tp.availability_sunday
-    FROM users u
-    LEFT JOIN trainer_profiles tp ON u.id = tp.user_id
-    WHERE u.id = ?
-");
+// Show success message if redirected after update
+if (isset($_GET['updated']) && $_GET['updated'] == '1') {
+    $updateMessage = 'Profile updated successfully!';
+}
 
-$stmt->execute([$userId]);
-$trainer = $stmt->fetch(PDO::FETCH_ASSOC);
-
-// Parse JSON fields
-$socialMedia = json_decode($trainer['social_media'] ?? '{}', true) ?: [];
-$availability = json_decode($trainer['availability'] ?? '{}', true) ?: [];
-$languages = json_decode($trainer['languages'] ?? '[]', true) ?: [];
-$achievements = json_decode($trainer['achievements'] ?? '[]', true) ?: [];
+// Get trainer profile data with improved query
+try {
+    // Check what columns exist in users table
+    $stmt = $conn->prepare("
+        SELECT COLUMN_NAME 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'users'
+    ");
+    $stmt->execute();
+    $userColumns = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    
+    // Build dynamic query based on available columns
+    $selectFields = ['u.id', 'u.name', 'u.email'];
+    
+    if (in_array('phone', $userColumns)) {
+        $selectFields[] = 'u.phone';
+    }
+    if (in_array('created_at', $userColumns)) {
+        $selectFields[] = 'u.created_at as user_created_at';
+    }
+    if (in_array('updated_at', $userColumns)) {
+        $selectFields[] = 'u.updated_at as user_updated_at';
+    }
+    
+    // Add trainer profile fields
+    $selectFields = array_merge($selectFields, [
+        'tp.specialization', 'tp.experience_years', 'tp.certification', 'tp.bio', 
+        'tp.hourly_rate', 'tp.profile_image', 'tp.social_media', 'tp.availability', 
+        'tp.languages', 'tp.achievements', 'tp.created_at as profile_created_at',
+        'tp.updated_at as profile_updated_at'
+    ]);
+    
+    $query = "SELECT " . implode(', ', $selectFields) . "
+        FROM users u
+        LEFT JOIN trainer_profiles tp ON u.id = tp.user_id
+        WHERE u.id = ?";
+    
+    $stmt = $conn->prepare($query);
+    $stmt->execute([$userId]);
+    $trainer = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$trainer) {
+        throw new Exception("Trainer not found");
+    }
+    
+    // Set default values for missing fields
+    if (!isset($trainer['phone'])) {
+        $trainer['phone'] = '';
+    }
+    
+    // Parse JSON fields safely
+    $socialMedia = [];
+    $availability = [];
+    $languages = [];
+    $achievements = [];
+    
+    if (!empty($trainer['social_media'])) {
+        $socialMedia = json_decode($trainer['social_media'], true) ?: [];
+    }
+    
+    if (!empty($trainer['availability'])) {
+        $availability = json_decode($trainer['availability'], true) ?: [];
+    }
+    
+    if (!empty($trainer['languages'])) {
+        $languages = json_decode($trainer['languages'], true) ?: [];
+    }
+    
+    if (!empty($trainer['achievements'])) {
+        $achievements = json_decode($trainer['achievements'], true) ?: [];
+    }
+    
+} catch (Exception $e) {
+    $updateError = 'Error loading profile data: ' . $e->getMessage();
+    error_log("Profile load error for user $userId: " . $e->getMessage());
+    
+    // Set default values if profile loading fails
+    $trainer = [
+        'id' => $userId,
+        'name' => $userName,
+        'email' => $_SESSION['email'] ?? '',
+        'phone' => '',
+        'specialization' => '',
+        'experience_years' => null,
+        'certification' => '',
+        'bio' => '',
+        'hourly_rate' => null,
+        'profile_image' => ''
+    ];
+    $socialMedia = [];
+    $availability = [];
+    $languages = [];
+    $achievements = [];
+}
 
 // Get performance statistics with proper error handling and default values
 $stats = [
@@ -201,7 +433,8 @@ try {
         member_id INT NOT NULL,
         status VARCHAR(20) DEFAULT 'active',
         assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_assignment (trainer_id, member_id)
+        UNIQUE KEY unique_assignment (trainer_id, member_id),
+        FOREIGN KEY (trainer_id) REFERENCES users(id) ON DELETE CASCADE
     )");
     
     // Total members
@@ -221,7 +454,8 @@ try {
         end_time DATETIME NOT NULL,
         status VARCHAR(20) DEFAULT 'scheduled',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (trainer_id) REFERENCES users(id) ON DELETE CASCADE
     )");
     
     // Total sessions this month
@@ -243,7 +477,8 @@ try {
         description TEXT,
         is_active TINYINT(1) DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (trainer_id) REFERENCES users(id) ON DELETE CASCADE
     )");
     
     // Total workout plans
@@ -259,7 +494,8 @@ try {
         member_id INT NOT NULL,
         rating DECIMAL(2,1) NOT NULL,
         review_text TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (trainer_id) REFERENCES users(id) ON DELETE CASCADE
     )");
     
     // Average rating
@@ -287,7 +523,8 @@ try {
         activity_type VARCHAR(50) NOT NULL,
         title VARCHAR(255) NOT NULL,
         description TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (trainer_id) REFERENCES users(id) ON DELETE CASCADE
     )");
     
     // Check if there are any activities, if not, create some sample ones with real timestamps
@@ -592,6 +829,13 @@ try {
             color: var(--primary);
         }
 
+        .avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+        }
+
         .avatar-upload {
             position: absolute;
             bottom: 10px;
@@ -738,6 +982,12 @@ try {
         .btn:hover {
             background: var(--primary-dark);
             transform: translateY(-1px);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
         }
 
         .btn-outline {
@@ -940,6 +1190,19 @@ try {
             padding-top: 2rem;
             border-top: 1px solid var(--border);
         }
+
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        .image-preview {
+            max-width: 200px;
+            max-height: 200px;
+            margin-top: 1rem;
+            border-radius: 0.5rem;
+            border: 2px solid var(--border);
+        }
     </style>
 </head>
 <body>
@@ -1027,14 +1290,14 @@ try {
                     <div class="profile-overview">
                         <div class="profile-avatar">
                             <div class="avatar-container">
-                                <?php if (!empty($trainer['profile_image'])): ?>
-                                    <img src="../<?php echo htmlspecialchars($trainer['profile_image']); ?>" alt="Profile" class="avatar">
-                                <?php else: ?>
-                                    <div class="avatar">
+                                <div class="avatar" id="avatarDisplay">
+                                    <?php if (!empty($trainer['profile_image']) && file_exists(__DIR__ . '/../' . $trainer['profile_image'])): ?>
+                                        <img src="../<?php echo htmlspecialchars($trainer['profile_image']); ?>?v=<?php echo time(); ?>" alt="Profile" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">
+                                    <?php else: ?>
                                         <?php echo strtoupper(substr($trainer['name'], 0, 1)); ?>
-                                    </div>
-                                <?php endif; ?>
-                                <button class="avatar-upload" onclick="document.getElementById('profile_image').click()">
+                                    <?php endif; ?>
+                                </div>
+                                <button class="avatar-upload" onclick="document.getElementById('profile_image').click()" type="button">
                                     <i class="fas fa-camera"></i>
                                 </button>
                             </div>
@@ -1070,9 +1333,15 @@ try {
                             <?php if (!empty($languages)): ?>
                                 <div class="languages-tags">
                                     <?php foreach ($languages as $language): ?>
-                                        <span class="tag"><?php echo htmlspecialchars(trim($language)); ?></span>
+                                        <?php if (!empty(trim($language))): ?>
+                                            <span class="tag"><?php echo htmlspecialchars(trim($language)); ?></span>
+                                        <?php endif; ?>
                                     <?php endforeach; ?>
                                 </div>
+                            <?php endif; ?>
+                            
+                            <?php if (!empty($trainer['bio'])): ?>
+                                <p style="margin-top: 1rem; font-style: italic;"><?php echo htmlspecialchars($trainer['bio']); ?></p>
                             <?php endif; ?>
                         </div>
                     </div>
@@ -1127,18 +1396,18 @@ try {
                     <h2><i class="fas fa-user-edit"></i> Edit Profile Information</h2>
                 </div>
                 <div class="card-content">
-                    <form action="" method="post" enctype="multipart/form-data">
+                    <form action="" method="post" enctype="multipart/form-data" id="profileForm">
                         <input type="hidden" name="update_profile" value="1">
-                        <input type="file" id="profile_image" name="profile_image" style="display: none;" accept="image/*">
+                        <input type="file" id="profile_image" name="profile_image" style="display: none;" accept="image/*" onchange="previewImage(this)">
                         
                         <div class="form-grid">
                             <div class="form-group">
-                                <label for="name">Full Name</label>
+                                <label for="name">Full Name *</label>
                                 <input type="text" id="name" name="name" class="form-control" value="<?php echo htmlspecialchars($trainer['name']); ?>" required>
                             </div>
                             
                             <div class="form-group">
-                                <label for="email">Email Address</label>
+                                <label for="email">Email Address *</label>
                                 <input type="email" id="email" name="email" class="form-control" value="<?php echo htmlspecialchars($trainer['email']); ?>" required>
                             </div>
                             
@@ -1154,7 +1423,7 @@ try {
                             
                             <div class="form-group">
                                 <label for="experience_years">Years of Experience</label>
-                                <input type="number" id="experience_years" name="experience_years" class="form-control" value="<?php echo htmlspecialchars($trainer['experience_years'] ?? ''); ?>" min="0">
+                                <input type="number" id="experience_years" name="experience_years" class="form-control" value="<?php echo htmlspecialchars($trainer['experience_years'] ?? ''); ?>" min="0" max="50">
                             </div>
                             
                             <div class="form-group">
@@ -1220,9 +1489,9 @@ try {
                                 <div class="day-schedule">
                                     <h4><?php echo $dayNames[$index]; ?></h4>
                                     <div class="time-inputs">
-                                        <input type="time" name="<?php echo $day; ?>_start" class="form-control" value="<?php echo $dayAvailability['start']; ?>">
+                                        <input type="time" name="<?php echo $day; ?>_start" class="form-control" value="<?php echo htmlspecialchars($dayAvailability['start']); ?>">
                                         <span>to</span>
-                                        <input type="time" name="<?php echo $day; ?>_end" class="form-control" value="<?php echo $dayAvailability['end']; ?>">
+                                        <input type="time" name="<?php echo $day; ?>_end" class="form-control" value="<?php echo htmlspecialchars($dayAvailability['end']); ?>">
                                     </div>
                                 </div>
                             <?php endforeach; ?>
@@ -1232,7 +1501,7 @@ try {
                             <button type="button" class="btn btn-outline" onclick="resetForm()">
                                 <i class="fas fa-undo"></i> Reset
                             </button>
-                            <button type="submit" class="btn">
+                            <button type="submit" class="btn" id="saveBtn">
                                 <i class="fas fa-save"></i> Save Profile
                             </button>
                         </div>
@@ -1273,25 +1542,34 @@ try {
             document.getElementById('sidebar').classList.toggle('show');
         });
 
-        // Profile image preview
-        document.getElementById('profile_image').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (file) {
+        // Profile image preview function
+        function previewImage(input) {
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                
+                // Validate file type
+                const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+                if (!allowedTypes.includes(file.type)) {
+                    alert('Please select a valid image file (JPEG, PNG, GIF, or WebP)');
+                    input.value = '';
+                    return;
+                }
+                
+                // Validate file size (5MB max)
+                if (file.size > 5 * 1024 * 1024) {
+                    alert('File size must be less than 5MB');
+                    input.value = '';
+                    return;
+                }
+                
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    const avatar = document.querySelector('.avatar');
-                    if (avatar.tagName === 'IMG') {
-                        avatar.src = e.target.result;
-                    } else {
-                        const img = document.createElement('img');
-                        img.src = e.target.result;
-                        img.className = 'avatar';
-                        avatar.parentNode.replaceChild(img, avatar);
-                    }
+                    const avatarDisplay = document.getElementById('avatarDisplay');
+                    avatarDisplay.innerHTML = `<img src="${e.target.result}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;" alt="Profile Preview">`;
                 };
                 reader.readAsDataURL(file);
             }
-        });
+        }
 
         // Reset form function
         function resetForm() {
@@ -1299,6 +1577,41 @@ try {
                 location.reload();
             }
         }
+
+        // Form submission with loading state
+        document.getElementById('profileForm').addEventListener('submit', function(e) {
+            const saveBtn = document.getElementById('saveBtn');
+            const form = this;
+            
+            // Add loading state
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+            form.classList.add('loading');
+            
+            // Validate required fields
+            const requiredFields = form.querySelectorAll('[required]');
+            let isValid = true;
+            
+            requiredFields.forEach(field => {
+                if (!field.value.trim()) {
+                    field.style.borderColor = 'var(--danger)';
+                    isValid = false;
+                } else {
+                    field.style.borderColor = 'var(--border)';
+                }
+            });
+            
+            if (!isValid) {
+                e.preventDefault();
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fas fa-save"></i> Save Profile';
+                form.classList.remove('loading');
+                alert('Please fill in all required fields');
+                return;
+            }
+            
+            // If validation passes, form will submit normally
+        });
 
         // Auto-save draft functionality
         let saveTimeout;
@@ -1309,34 +1622,146 @@ try {
                 clearTimeout(saveTimeout);
                 saveTimeout = setTimeout(() => {
                     // Save draft to localStorage
-                    const formData = new FormData(document.querySelector('form'));
+                    const formData = new FormData(document.getElementById('profileForm'));
                     const draftData = {};
                     for (let [key, value] of formData.entries()) {
-                        draftData[key] = value;
+                        if (key !== 'profile_image') { // Don't save file input
+                            draftData[key] = value;
+                        }
                     }
-                    localStorage.setItem('profileDraft', JSON.stringify(draftData));
-                }, 1000);
+                    localStorage.setItem('profileDraft_' + <?php echo $userId; ?>, JSON.stringify(draftData));
+                }, 2000);
             });
         });
 
         // Load draft on page load
         window.addEventListener('load', function() {
-            const draft = localStorage.getItem('profileDraft');
+            const draft = localStorage.getItem('profileDraft_' + <?php echo $userId; ?>);
             if (draft) {
-                const draftData = JSON.parse(draft);
-                Object.keys(draftData).forEach(key => {
-                    const input = document.querySelector(`[name="${key}"]`);
-                    if (input && input.value === '') {
-                        input.value = draftData[key];
-                    }
-                });
+                try {
+                    const draftData = JSON.parse(draft);
+                    Object.keys(draftData).forEach(key => {
+                        const input = document.querySelector(`[name="${key}"]`);
+                        if (input && input.value === '' && draftData[key]) {
+                            input.value = draftData[key];
+                        }
+                    });
+                } catch (e) {
+                    console.error('Error loading draft:', e);
+                }
             }
         });
 
         // Clear draft on successful save
-        document.querySelector('form').addEventListener('submit', function() {
-            localStorage.removeItem('profileDraft');
+        document.getElementById('profileForm').addEventListener('submit', function() {
+            localStorage.removeItem('profileDraft_' + <?php echo $userId; ?>);
         });
+
+        // Real-time validation
+        document.getElementById('email').addEventListener('blur', function() {
+            const email = this.value;
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            
+            if (email && !emailRegex.test(email)) {
+                this.style.borderColor = 'var(--danger)';
+                this.title = 'Please enter a valid email address';
+            } else {
+                this.style.borderColor = 'var(--border)';
+                this.title = '';
+            }
+        });
+
+        // Phone number formatting
+        document.getElementById('phone').addEventListener('input', function() {
+            let value = this.value.replace(/\D/g, '');
+            if (value.length >= 6) {
+                value = value.replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3');
+            } else if (value.length >= 3) {
+                value = value.replace(/(\d{3})(\d{0,3})/, '($1) $2');
+            }
+            this.value = value;
+        });
+
+        // Auto-hide alerts after 5 seconds
+        setTimeout(function() {
+            const alerts = document.querySelectorAll('.alert');
+            alerts.forEach(alert => {
+                alert.style.opacity = '0';
+                alert.style.transform = 'translateY(-10px)';
+                setTimeout(() => {
+                    if (alert.parentNode) {
+                        alert.parentNode.removeChild(alert);
+                    }
+                }, 300);
+            });
+        }, 5000);
+
+        // Smooth scroll to form on edit button click
+        function scrollToForm() {
+            document.querySelector('#profileForm').scrollIntoView({
+                behavior: 'smooth',
+                block: 'start'
+            });
+        }
+
+        // Add click handler to profile overview for quick edit
+        document.querySelector('.profile-overview').addEventListener('click', function(e) {
+            if (e.target.closest('.avatar-upload')) {
+                return; // Don't scroll if clicking upload button
+            }
+            scrollToForm();
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + S to save
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                document.getElementById('profileForm').dispatchEvent(new Event('submit'));
+            }
+            
+            // Escape to reset form
+            if (e.key === 'Escape') {
+                resetForm();
+            }
+        });
+
+        // Form field animations
+        const formControls = document.querySelectorAll('.form-control');
+        formControls.forEach(control => {
+            control.addEventListener('focus', function() {
+                this.parentElement.style.transform = 'scale(1.02)';
+                this.parentElement.style.transition = 'transform 0.2s ease';
+            });
+            
+            control.addEventListener('blur', function() {
+                this.parentElement.style.transform = 'scale(1)';
+            });
+        });
+
+        // Success animation for saved profile
+        <?php if (isset($_GET['updated']) && $_GET['updated'] == '1'): ?>
+        setTimeout(function() {
+            const profileOverview = document.querySelector('.profile-overview');
+            profileOverview.style.animation = 'pulse 0.6s ease-in-out';
+        }, 500);
+        <?php endif; ?>
     </script>
+
+    <style>
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        
+        .form-group {
+            transition: transform 0.2s ease;
+        }
+        
+        .alert {
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+    </style>
 </body>
 </html>

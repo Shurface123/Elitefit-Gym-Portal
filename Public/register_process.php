@@ -122,9 +122,13 @@ function sendOTPEmail($email, $name, $otp, $role) {
 
 // Function to log registration activity
 function logRegistration($email, $success, $role, $message) {
-    $conn = connectDB();
-    $stmt = $conn->prepare("INSERT INTO registration_logs (email, success, role, message, ip_address, timestamp) VALUES (?, ?, ?, ?, ?, NOW())");
-    $stmt->execute([$email, $success, $role, $message, $_SERVER['REMOTE_ADDR']]);
+    try {
+        $conn = connectDB();
+        $stmt = $conn->prepare("INSERT INTO registration_logs (email, success, role, message, ip_address, timestamp) VALUES (?, ?, ?, ?, ?, NOW())");
+        $stmt->execute([$email, $success, $role, $message, $_SERVER['REMOTE_ADDR']]);
+    } catch (Exception $e) {
+        error_log("Failed to log registration: " . $e->getMessage());
+    }
 }
 
 // Check if form is submitted
@@ -194,16 +198,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 exit;
             }
             
-            // Check if email already exists in pending verifications
-            $checkPendingStmt = $conn->prepare("SELECT id FROM pending_registrations WHERE email = ? AND expires_at > NOW()");
-            $checkPendingStmt->execute([$email]);
-            
-            if ($checkPendingStmt->rowCount() > 0) {
-                $_SESSION['register_error'] = "A verification email has already been sent to this address. Please check your email or wait for the current verification to expire.";
-                header("Location: register.php");
-                exit;
-            }
-            
             // Generate OTP
             $otp = generateOTP(6);
             $otpExpiry = date('Y-m-d H:i:s', strtotime('+15 minutes'));
@@ -211,24 +205,17 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             // Hash password
             $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
             
+            // Delete any existing pending registration for this email
+            $deleteStmt = $conn->prepare("DELETE FROM pending_registrations WHERE email = ?");
+            $deleteStmt->execute([$email]);
+            
             // Store pending registration in database
             $pendingStmt = $conn->prepare("
                 INSERT INTO pending_registrations (
                     name, email, password_hash, role, experience_level, 
                     fitness_goals, preferred_routines, otp_code, expires_at, 
-                    created_at, ip_address, user_agent
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)
-                ON DUPLICATE KEY UPDATE
-                    name = VALUES(name),
-                    password_hash = VALUES(password_hash),
-                    role = VALUES(role),
-                    experience_level = VALUES(experience_level),
-                    fitness_goals = VALUES(fitness_goals),
-                    preferred_routines = VALUES(preferred_routines),
-                    otp_code = VALUES(otp_code),
-                    expires_at = VALUES(expires_at),
-                    created_at = NOW(),
-                    verification_attempts = 0
+                    created_at, ip_address, user_agent, verification_attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, 0)
             ");
             
             $pendingStmt->execute([
@@ -241,29 +228,34 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 $preferredRoutines,
                 $otp,
                 $otpExpiry,
-                $_SERVER['REMOTE_ADDR'],
-                $_SERVER['HTTP_USER_AGENT']
+                $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+                $_SERVER['HTTP_USER_AGENT'] ?? 'unknown'
             ]);
             
             // Send OTP email
             if (sendOTPEmail($email, $name, $otp, $role)) {
-                // Log registration attempt in analytics
-                $analyticsStmt = $conn->prepare("
-                    INSERT INTO registration_analytics (
-                        email, role, registration_date, ip_address, 
-                        user_agent, referrer, completion_step, status
-                    ) VALUES (
-                        ?, ?, NOW(), ?, ?, ?, 'OTP Sent', 'Pending Verification'
-                    )
-                ");
-                
-                $analyticsStmt->execute([
-                    $email,
-                    $role,
-                    $_SERVER['REMOTE_ADDR'],
-                    $_SERVER['HTTP_USER_AGENT'],
-                    $_SERVER['HTTP_REFERER'] ?? null
-                ]);
+                try {
+                    // Log registration attempt in analytics (optional - only if table exists)
+                    $analyticsStmt = $conn->prepare("
+                        INSERT INTO registration_analytics (
+                            email, role, registration_date, ip_address, 
+                            user_agent, referrer, completion_step, status
+                        ) VALUES (
+                            ?, ?, NOW(), ?, ?, ?, 'OTP Sent', 'Pending Verification'
+                        )
+                    ");
+                    
+                    $analyticsStmt->execute([
+                        $email,
+                        $role,
+                        $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+                        $_SERVER['HTTP_USER_AGENT'] ?? 'unknown',
+                        $_SERVER['HTTP_REFERER'] ?? null
+                    ]);
+                } catch (Exception $e) {
+                    // Analytics table might not exist, continue anyway
+                    error_log("Analytics logging failed: " . $e->getMessage());
+                }
                 
                 // Store email in session for verification page
                 $_SESSION['verification_email'] = $email;
@@ -286,6 +278,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             
         } catch (PDOException $e) {
             // Log error
+            error_log("Registration database error: " . $e->getMessage());
             logRegistration($email, 0, $role, "Database error: " . $e->getMessage());
             
             // Set error message
